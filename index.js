@@ -80,6 +80,7 @@ const pickErr = (e) => (typeof e === "string" ? e : e?.message || String(e));
 function fmt(dt) {
   try {
     return new Date(dt).toLocaleString("th-TH", {
+      timeZone: "Asia/Bangkok",
       hour: "2-digit",
       minute: "2-digit",
       day: "2-digit",
