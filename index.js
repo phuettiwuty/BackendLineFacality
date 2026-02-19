@@ -1116,7 +1116,18 @@ app.post("/tenant/facility-bookings/:id/check-in", requireLineLogin, async (req,
     if (bk.checked_in_at) return res.json({ ok: true, item: bk, already: true });
     if (bk.status !== "booked") return res.status(400).json({ error: "สถานะไม่ถูกต้อง" });
 
+    // ✅ เช็คเวลา: อนุโลมก่อน 10 นาที
     const now = new Date();
+    const start = new Date(bk.start_at);
+    const end = new Date(bk.end_at);
+
+    const earlyMs = 10 * 60 * 1000;
+    if (now.getTime() < start.getTime() - earlyMs) {
+      return res.status(400).json({ error: "ยังไม่ถึงเวลาเข้าใช้งาน" });
+    }
+    if (now.getTime() > end.getTime()) {
+      return res.status(400).json({ error: "เลยเวลาใช้งานแล้ว" });
+    }
 
     const { data: updated, error: updErr } = await supabaseAdmin
       .schema("public")
