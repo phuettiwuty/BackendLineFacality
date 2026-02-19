@@ -1002,9 +1002,7 @@ app.post("/tenant/facility-bookings", requireLineLogin, async (req, res) => {
       .eq("dorm_user_id", dormUserId)
       .gte("start_at", dayStart.toISOString())
       .lt("start_at", dayEnd.toISOString())
-      .in("status", ["active"])
-      .lte("start_at", now.toISOString())
-      ;
+       .in("status", ["booked", "active"]);
 
     if (dayErr) return res.status(500).json({ error: pickErr(dayErr) });
 
