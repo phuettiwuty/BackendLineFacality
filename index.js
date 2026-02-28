@@ -16,6 +16,8 @@ import multer from "multer";
 import { randomUUID } from "crypto";
 import cron from "node-cron";
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 const app = express();
 
@@ -26,6 +28,7 @@ app.use(
     credentials: true,
     allowedHeaders: [
       "Content-Type",
+      "Authorization",
       "x-line-user-id",
       "Cache-Control",
       "cache-control",
@@ -64,7 +67,358 @@ const supabaseAdmin = createClient(
 
 // ✅ health check
 app.get("/health", (req, res) => res.json({ ok: true }));
+/* =========================
+   Auth v1 (OWNER USERS)
+   - POST /api/v1/auth/register
+   - POST /api/v1/auth/verify/email
+   - POST /api/v1/auth/verify/resend
+   - POST /api/v1/auth/login
+   - POST /api/v1/auth/password/forgot
+   - POST /api/v1/auth/password/reset
+   ========================= */
 
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
+const VERIFY_EXPIRES_MIN = Number(process.env.VERIFY_EXPIRES_MIN || 15);
+const RESET_EXPIRES_MIN = Number(process.env.RESET_EXPIRES_MIN || 15);
+
+function normEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+function makeCode(len = 6) {
+  // 000000-999999
+  return String(Math.floor(Math.random() * 10 ** len)).padStart(len, "0");
+}
+function addMinutes(d, mins) {
+  return new Date(d.getTime() + mins * 60 * 1000);
+}
+
+async function sendEmailMock(to, subject, text) {
+  // ✅ ตอนนี้ mock ไว้ก่อน (ใน Render จะเห็นใน Logs)
+  console.log("[EMAIL MOCK]", { to, subject, text });
+}
+
+/** สร้าง JWT */
+function signToken(user) {
+  return jwt.sign(
+    { sub: user.id, role: user.role || "OWNER", email: user.email },
+    JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+}
+
+/** หา user ด้วย email */
+async function getOwnerByEmail(email) {
+  const { data, error } = await supabaseAdmin
+    .schema("public")
+    .from("owner_users")
+    .select("*")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+/** สร้าง verification request */
+async function createVerification({ userId, type, channel, code, email, phone, expiresAt }) {
+  const { data, error } = await supabaseAdmin
+    .schema("public")
+    .from("verification_requests")
+    .insert([
+      {
+        user_id: userId,
+        type,
+        channel,
+        code,
+        email: email || null,
+        phone: phone || null,
+        is_used: false,
+        expires_at: expiresAt.toISOString(),
+      },
+    ])
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+/** ใช้โค้ด verify (ต้องไม่หมดอายุ/ไม่ถูกใช้) */
+async function consumeCode({ userId, type, channel, code }) {
+  const nowIso = new Date().toISOString();
+
+  // หา request ล่าสุดที่ตรงเงื่อนไข
+  const { data, error } = await supabaseAdmin
+    .schema("public")
+    .from("verification_requests")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("type", type)
+    .eq("channel", channel)
+    .eq("code", code)
+    .eq("is_used", false)
+    .gt("expires_at", nowIso)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  // mark used
+  const { error: updErr } = await supabaseAdmin
+    .schema("public")
+    .from("verification_requests")
+    .update({ is_used: true })
+    .eq("id", data.id);
+
+  if (updErr) throw updErr;
+  return data;
+}
+
+/** 1) REGISTER */
+app.post("/api/v1/auth/register", async (req, res) => {
+  try {
+    const name = String(req.body?.name || "").trim();
+    const email = normEmail(req.body?.email);
+    const phone = String(req.body?.phone || "").trim() || null;
+    const password = String(req.body?.password || "");
+
+    if (!name) return res.status(400).json({ error: "name_required" });
+    if (!email) return res.status(400).json({ error: "email_required" });
+    if (password.length < 6) return res.status(400).json({ error: "password_min_6" });
+
+    const exists = await getOwnerByEmail(email);
+    if (exists) return res.status(409).json({ error: "email_already_used" });
+
+    const password_hash = await bcrypt.hash(password, 10);
+
+    const { data: user, error } = await supabaseAdmin
+      .schema("public")
+      .from("owner_users")
+      .insert([
+        {
+          name,
+          email,
+          phone,
+          password_hash,
+          role: "OWNER",
+          is_verified: false,
+        },
+      ])
+      .select("id, name, email, phone, role, is_verified, created_at")
+      .single();
+
+    if (error) return res.status(500).json({ error: pickErr(error) });
+
+    // create verify code
+    const code = makeCode(6);
+    const expiresAt = addMinutes(new Date(), VERIFY_EXPIRES_MIN);
+    await createVerification({
+      userId: user.id,
+      type: "EMAIL_VERIFY",
+      channel: "EMAIL",
+      code,
+      email: user.email,
+      expiresAt,
+    });
+
+    await sendEmailMock(
+      user.email,
+      "Verify your email",
+      `Your verification code is ${code} (expires in ${VERIFY_EXPIRES_MIN} min)`
+    );
+
+    return res.json({
+      ok: true,
+      user,
+      verify: { sent: true, channel: "EMAIL" },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: pickErr(e) });
+  }
+});
+
+/** 2) VERIFY EMAIL */
+app.post("/api/v1/auth/verify/email", async (req, res) => {
+  try {
+    const email = normEmail(req.body?.email);
+    const code = String(req.body?.code || "").trim();
+
+    if (!email) return res.status(400).json({ error: "email_required" });
+    if (!code) return res.status(400).json({ error: "code_required" });
+
+    const user = await getOwnerByEmail(email);
+    if (!user) return res.status(404).json({ error: "user_not_found" });
+
+    const used = await consumeCode({
+      userId: user.id,
+      type: "EMAIL_VERIFY",
+      channel: "EMAIL",
+      code,
+    });
+
+    if (!used) return res.status(400).json({ error: "invalid_or_expired_code" });
+
+    const { data: updated, error } = await supabaseAdmin
+      .schema("public")
+      .from("owner_users")
+      .update({ is_verified: true, updated_at: new Date().toISOString() })
+      .eq("id", user.id)
+      .select("id, name, email, phone, role, is_verified")
+      .single();
+
+    if (error) return res.status(500).json({ error: pickErr(error) });
+
+    return res.json({ ok: true, user: updated });
+  } catch (e) {
+    return res.status(500).json({ error: pickErr(e) });
+  }
+});
+
+/** 3) RESEND VERIFY */
+app.post("/api/v1/auth/verify/resend", async (req, res) => {
+  try {
+    const email = normEmail(req.body?.email);
+    if (!email) return res.status(400).json({ error: "email_required" });
+
+    const user = await getOwnerByEmail(email);
+    if (!user) return res.status(404).json({ error: "user_not_found" });
+    if (user.is_verified) return res.json({ ok: true, already_verified: true });
+
+    const code = makeCode(6);
+    const expiresAt = addMinutes(new Date(), VERIFY_EXPIRES_MIN);
+    await createVerification({
+      userId: user.id,
+      type: "EMAIL_VERIFY",
+      channel: "EMAIL",
+      code,
+      email: user.email,
+      expiresAt,
+    });
+
+    await sendEmailMock(
+      user.email,
+      "Verify your email (resend)",
+      `Your verification code is ${code} (expires in ${VERIFY_EXPIRES_MIN} min)`
+    );
+
+    return res.json({ ok: true, resent: true });
+  } catch (e) {
+    return res.status(500).json({ error: pickErr(e) });
+  }
+});
+
+/** 4) LOGIN */
+app.post("/api/v1/auth/login", async (req, res) => {
+  try {
+    const email = normEmail(req.body?.email);
+    const password = String(req.body?.password || "");
+
+    if (!email) return res.status(400).json({ error: "email_required" });
+    if (!password) return res.status(400).json({ error: "password_required" });
+
+    const user = await getOwnerByEmail(email);
+    if (!user) return res.status(401).json({ error: "invalid_credentials" });
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: "invalid_credentials" });
+
+    if (!user.is_verified) return res.status(403).json({ error: "email_not_verified" });
+
+    const token = signToken(user);
+
+    return res.json({
+      ok: true,
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        is_verified: user.is_verified,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: pickErr(e) });
+  }
+});
+
+/** 5) FORGOT PASSWORD */
+app.post("/api/v1/auth/password/forgot", async (req, res) => {
+  try {
+    const email = normEmail(req.body?.email);
+    if (!email) return res.status(400).json({ error: "email_required" });
+
+    const user = await getOwnerByEmail(email);
+
+    // ✅ กัน user enumeration: ไม่บอกว่ามี/ไม่มี user
+    if (!user) return res.json({ ok: true, sent: true });
+
+    const code = makeCode(6);
+    const expiresAt = addMinutes(new Date(), RESET_EXPIRES_MIN);
+    await createVerification({
+      userId: user.id,
+      type: "PASSWORD_RESET",
+      channel: "EMAIL",
+      code,
+      email: user.email,
+      expiresAt,
+    });
+
+    await sendEmailMock(
+      user.email,
+      "Reset your password",
+      `Your reset code is ${code} (expires in ${RESET_EXPIRES_MIN} min)`
+    );
+
+    return res.json({ ok: true, sent: true });
+  } catch (e) {
+    return res.status(500).json({ error: pickErr(e) });
+  }
+});
+
+/** 6) RESET PASSWORD */
+app.post("/api/v1/auth/password/reset", async (req, res) => {
+  try {
+    const email = normEmail(req.body?.email);
+    const code = String(req.body?.code || "").trim();
+    const newPassword = String(req.body?.new_password || "");
+
+    if (!email) return res.status(400).json({ error: "email_required" });
+    if (!code) return res.status(400).json({ error: "code_required" });
+    if (newPassword.length < 6) return res.status(400).json({ error: "password_min_6" });
+
+    const user = await getOwnerByEmail(email);
+    if (!user) return res.status(404).json({ error: "user_not_found" });
+
+    const used = await consumeCode({
+      userId: user.id,
+      type: "PASSWORD_RESET",
+      channel: "EMAIL",
+      code,
+    });
+
+    if (!used) return res.status(400).json({ error: "invalid_or_expired_code" });
+
+    const password_hash = await bcrypt.hash(newPassword, 10);
+
+    const { data: updated, error } = await supabaseAdmin
+      .schema("public")
+      .from("owner_users")
+      .update({ password_hash, updated_at: new Date().toISOString() })
+      .eq("id", user.id)
+      .select("id, name, email, phone, role, is_verified")
+      .single();
+
+    if (error) return res.status(500).json({ error: pickErr(error) });
+
+    return res.json({ ok: true, user: updated });
+  } catch (e) {
+    return res.status(500).json({ error: pickErr(e) });
+  }
+});
 /* =========================
    Helpers
    ========================= */
