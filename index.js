@@ -19,7 +19,7 @@ import crypto from "crypto";
 
 const app = express();
 
-// ✅ CORS (รองรับ header x-admin-secret)
+// ✅ CORS
 app.use(
   cors({
     origin: true,
@@ -27,7 +27,6 @@ app.use(
     allowedHeaders: [
       "Content-Type",
       "x-line-user-id",
-      "x-admin-secret",
       "Cache-Control",
       "cache-control",
       "Pragma",
@@ -54,7 +53,7 @@ console.log("HAS_SERVICE_ROLE:", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
 console.log("REPAIR_BUCKET:", REPAIR_BUCKET);
 console.log("PARCEL_BUCKET:", PARCEL_BUCKET);
 console.log("HAS_LINE_MESSAGING_TOKEN:", !!process.env.LINE_MESSAGING_ACCESS_TOKEN);
-console.log("HAS_ADMIN_DEV_SECRET:", !!process.env.ADMIN_DEV_SECRET);
+// NOTE: ปิดโหมด admin secret แล้ว (ฝั่งเว็บจะไม่ต้องกรอกรหัส admin)
 
 // ---- Supabase Admin Client ----
 const supabaseAdmin = createClient(
@@ -426,28 +425,11 @@ async function isAdminLineUser(lineUserId) {
   return data?.role === "admin";
 }
 
-async function requireAdmin(req, res, next) {
-  try {
-    const secret = req.headers["x-admin-secret"] || req.query.adminSecret || req.body?.adminSecret;
-
-    // ✅ dev secret ผ่านเลย
-    if (secret && process.env.ADMIN_DEV_SECRET && String(secret) === String(process.env.ADMIN_DEV_SECRET)) {
-      req.adminLineUserId = "dev-admin";
-      return next();
-    }
-
-    // ✅ โหมดจริง
-    const adminLineUserId = req.headers["x-line-user-id"] || req.query.adminLineUserId || req.body?.adminLineUserId;
-    if (!adminLineUserId) return res.status(401).json({ error: "adminLineUserId required" });
-
-    const ok = await isAdminLineUser(String(adminLineUserId));
-    if (!ok) return res.status(403).json({ error: "forbidden_not_admin" });
-
-    req.adminLineUserId = String(adminLineUserId);
-    next();
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "admin_check_failed" });
-  }
+function requireAdmin(req, res, next) {
+  // ✅ ปิดการเช็คสิทธิ์แอดมินทั้งหมด (ไม่มี admin secret / ไม่เช็ค role)
+  // หมายเหตุ: route ที่ครอบด้วย requireAdmin จะเปิดให้ใช้งานได้ทุกคน
+  req.adminLineUserId = "public-admin";
+  return next();
 }
 
 // ✅ push LINE message (ข้อความอย่างเดียว / หรือ object text)
@@ -1316,7 +1298,7 @@ cron.schedule("* * * * *", async () => {
   }
 });
 /* =========================
-   Facility Bookings (Admin/Owner by x-admin-secret)
+   Facility Bookings (Admin/Owner)
    ========================= */
 
 // helper: day boundary from date string (YYYY-MM-DD) in Bangkok -> UTC range
