@@ -7,7 +7,8 @@
 // - ใช้ขอบเขตวันแบบ explicit +07:00 (ไม่ลบ 7 ชั่วโมงซ้ำ)
 // - availability key HH:mm ใช้ Asia/Bangkok เสถียร ไม่ขึ้นกับ timezone เครื่อง
 // - เพิ่ม route cancel ใน Routes ready
-
+import jwt from "jsonwebtoken";
+import multer from "multer";
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
@@ -80,6 +81,43 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 const VERIFY_EXPIRES_MIN = Number(process.env.VERIFY_EXPIRES_MIN || 15);
 const RESET_EXPIRES_MIN = Number(process.env.RESET_EXPIRES_MIN || 15);
+
+
+
+function authRequired(req, res, next) {
+  try {
+    const h = req.headers.authorization || "";
+    const m = h.match(/^Bearer\s+(.+)$/i);
+    if (!m) return res.status(401).json({ error: "missing_bearer_token" });
+
+    if (!JWT_SECRET) return res.status(500).json({ error: "JWT_SECRET_not_set" });
+
+    const payload = jwt.verify(m[1], JWT_SECRET);
+    req.ownerId = payload?.sub;
+    if (!req.ownerId) return res.status(401).json({ error: "invalid_token_no_sub" });
+
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: "invalid_token" });
+  }
+}
+
+
+async function assertOwnsCondo(ownerId, condoId) {
+  const { data, error } = await supabaseAdmin
+    .schema("public")
+    .from("condos")
+    .select("id, owner_id")
+    .eq("id", condoId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return { ok: false, status: 404, error: "condo_not_found" };
+  if (data.owner_id !== ownerId) return { ok: false, status: 403, error: "forbidden_not_owner" };
+  return { ok: true, condo: data };
+}
+
+
 
 function normEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -485,7 +523,355 @@ function hhmmBangkokFromISO(iso) {
    Multer
    ========================= */
 const upload = multer({ storage: multer.memoryStorage() });
+ ////// สร้างคอนโด
+app.post("/api/v1/condos", authRequired, upload.single("logo"), async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
 
+    // 1 owner = 1 condo check
+    const { data: existing, error: exErr } = await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .select("id")
+      .eq("owner_id", ownerId)
+      .maybeSingle();
+    if (exErr) return res.status(500).json({ error: exErr.message });
+    if (existing) return res.status(409).json({ error: "owner_already_has_condo" });
+
+    const raw = req.body?.payload;
+    if (!raw) return res.status(400).json({ error: "payload_required" });
+
+    let payload;
+    try { payload = JSON.parse(raw); } catch { return res.status(400).json({ error: "payload_invalid_json" }); }
+
+    const name_th = String(payload?.nameTh || "").trim();
+    const address_th = String(payload?.addressTh || "").trim();
+    if (!name_th) return res.status(400).json({ error: "nameTh_required" });
+    if (!address_th) return res.status(400).json({ error: "addressTh_required" });
+
+    // logo_url: ยังไม่ทำ upload => null
+    const logo_url = null;
+
+    const { data: condo, error } = await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .insert([{
+        owner_id: ownerId,
+        name_th,
+        name_en: payload?.nameEn || null,
+        address_th,
+        address_en: payload?.addressEn || null,
+        phone_number: payload?.phoneNumber || null,
+        tax_id: payload?.taxId || null,
+        logo_url,
+        payment_due_date: payload?.paymentDueDate || null,
+        accept_fine: !!payload?.acceptFine,
+        fine_amount: Number(payload?.fineAmount || 0),
+        payment_note: payload?.paymentNote || null,
+        floor_count: Number(payload?.floorCount || 1),
+      }])
+      .select("id")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.status(201).json({ ok: true, condoId: condo.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.get("/api/v1/condos/mine", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+
+    const { data: condo, error } = await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .select("id, name_th, floor_count")
+      .eq("owner_id", ownerId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!condo) return res.json({ ok: true, condo: null });
+
+    // counts
+    const { count: totalRooms } = await supabaseAdmin
+      .schema("public")
+      .from("rooms")
+      .select("*", { count: "exact", head: true })
+      .eq("condo_id", condo.id);
+
+    const { count: occupiedRooms } = await supabaseAdmin
+      .schema("public")
+      .from("rooms")
+      .select("*", { count: "exact", head: true })
+      .eq("condo_id", condo.id)
+      .eq("status", "OCCUPIED");
+
+    const tr = Number(totalRooms || 0);
+    const or = Number(occupiedRooms || 0);
+
+    return res.json({
+      ok: true,
+      condo: {
+        id: condo.id,
+        nameTh: condo.name_th,
+        floorCount: condo.floor_count,
+        totalRooms: tr,
+        occupiedRooms: or,
+        vacantRooms: Math.max(tr - or, 0),
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.post("/api/v1/condos/:condoId/services", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const name = String(req.body?.name || "").trim();
+    const price = Number(req.body?.price || 0);
+    const is_variable = !!req.body?.isVariable;
+    const variable_type = String(req.body?.variableType || "NONE").toUpperCase();
+
+    if (!name) return res.status(400).json({ error: "name_required" });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_services")
+      .insert([{ condo_id: condoId, name, price, is_variable, variable_type }])
+      .select("*")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, service: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.put("/api/v1/condos/:condoId/utilities", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const water = req.body?.water;
+    const electricity = req.body?.electricity;
+
+    const rows = [];
+    if (water) rows.push({ condo_id: condoId, utility_type: "water", billing_type: water.billingType, rate: Number(water.rate || 0) });
+    if (electricity) rows.push({ condo_id: condoId, utility_type: "electricity", billing_type: electricity.billingType, rate: Number(electricity.rate || 0) });
+
+    if (!rows.length) return res.status(400).json({ error: "no_configs" });
+
+    // Supabase upsert โดยใช้ unique(condo_id, utility_type)
+    const { error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_utility_configs")
+      .upsert(rows, { onConflict: "condo_id,utility_type" });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.post("/api/v1/condos/:condoId/bank-accounts", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const bank = String(req.body?.bank || "").trim();
+    const account_name = String(req.body?.accountName || "").trim();
+    const account_no = String(req.body?.accountNo || "").trim();
+
+    if (!bank || !account_name || !account_no) return res.status(400).json({ error: "missing_fields" });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_bank_accounts")
+      .insert([{ condo_id: condoId, bank, account_name, account_no }])
+      .select("*")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, account: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.post("/api/v1/condos/:condoId/floors", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const floorCount = Number(req.body?.floorCount || 0);
+    const roomsPerFloor = req.body?.roomsPerFloor;
+
+    if (!floorCount || !Array.isArray(roomsPerFloor) || roomsPerFloor.length !== floorCount) {
+      return res.status(400).json({ error: "invalid_floor_payload" });
+    }
+
+    const inserts = [];
+    for (let f = 1; f <= floorCount; f++) {
+      const n = Number(roomsPerFloor[f - 1] || 0);
+      for (let i = 1; i <= n; i++) {
+        const roomNo = `${f}${String(i).padStart(2, "0")}`; // 101..108, 201..208
+        inserts.push({
+          condo_id: condoId,
+          floor: f,
+          room_no: roomNo,
+          status: "VACANT",
+          is_active: true,
+        });
+      }
+    }
+
+    const { error } = await supabaseAdmin
+      .schema("public")
+      .from("rooms")
+      .insert(inserts);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // update floor_count ที่ condos ด้วย
+    await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .update({ floor_count: floorCount, updated_at: new Date().toISOString() })
+      .eq("id", condoId);
+
+    return res.json({ ok: true, totalRooms: inserts.length });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.put("/api/v1/condos/:condoId/rooms/price", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const rooms = req.body?.rooms;
+    if (!Array.isArray(rooms) || rooms.length === 0) return res.status(400).json({ error: "rooms_required" });
+
+    for (const r of rooms) {
+      await supabaseAdmin.schema("public").from("rooms")
+        .update({ price: Number(r.price), updated_at: new Date().toISOString() })
+        .eq("id", r.roomId)
+        .eq("condo_id", condoId);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+app.put("/api/v1/condos/:condoId/rooms/status", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const rooms = req.body?.rooms;
+    if (!Array.isArray(rooms) || rooms.length === 0) return res.status(400).json({ error: "rooms_required" });
+
+    for (const r of rooms) {
+      await supabaseAdmin.schema("public").from("rooms")
+        .update({ status: String(r.status), updated_at: new Date().toISOString() })
+        .eq("id", r.roomId)
+        .eq("condo_id", condoId);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.put("/api/v1/condos/:condoId/rooms/service", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const rooms = req.body?.rooms;
+    if (!Array.isArray(rooms) || rooms.length === 0) return res.status(400).json({ error: "rooms_required" });
+
+    for (const r of rooms) {
+      await supabaseAdmin.schema("public").from("rooms")
+        .update({ service_id: r.serviceId || null, updated_at: new Date().toISOString() })
+        .eq("id", r.roomId)
+        .eq("condo_id", condoId);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+app.get("/api/v1/condos/:condoId/rooms", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("rooms")
+      .select("id, floor, room_no, price, status, service_id")
+      .eq("condo_id", condoId)
+      .order("floor", { ascending: true })
+      .order("room_no", { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      rooms: (data || []).map(r => ({
+        id: r.id,
+        floor: r.floor,
+        roomNo: r.room_no,
+        price: r.price,
+        status: r.status,
+        serviceId: r.service_id,
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
 /* ===================================
    ========== DORM + LINE LOGIN =======
    =================================== */
