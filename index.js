@@ -13,7 +13,6 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
-import multer from "multer";
 import { randomUUID } from "crypto";
 import cron from "node-cron";
 import crypto from "crypto";
