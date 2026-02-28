@@ -17,7 +17,6 @@ import { randomUUID } from "crypto";
 import cron from "node-cron";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 
 const app = express();
 
