@@ -526,15 +526,15 @@ app.post("/api/v1/condos", authRequired, upload.single("logo"), async (req, res)
   try {
     const ownerId = req.ownerId;
 
-    // 1 owner = 1 condo check
-    const { data: existing, error: exErr } = await supabaseAdmin
-      .schema("public")
-      .from("condos")
-      .select("id")
-      .eq("owner_id", ownerId)
-      .maybeSingle();
-    if (exErr) return res.status(500).json({ error: exErr.message });
-    if (existing) return res.status(409).json({ error: "owner_already_has_condo" });
+    // // 1 owner = 1 condo check
+    // const { data: existing, error: exErr } = await supabaseAdmin
+    //   .schema("public")
+    //   .from("condos")
+    //   .select("id")
+    //   .eq("owner_id", ownerId)
+    //   .maybeSingle();
+    // if (exErr) return res.status(500).json({ error: exErr.message });
+    // if (existing) return res.status(409).json({ error: "owner_already_has_condo" });
 
     const raw = req.body?.payload;
     if (!raw) return res.status(400).json({ error: "payload_required" });
@@ -582,44 +582,43 @@ app.post("/api/v1/condos", authRequired, upload.single("logo"), async (req, res)
 app.get("/api/v1/condos/mine", authRequired, async (req, res) => {
   try {
     const ownerId = req.ownerId;
-
-    const { data: condo, error } = await supabaseAdmin
+    const { data: condos, error } = await supabaseAdmin
       .schema("public")
       .from("condos")
       .select("id, name_th, floor_count")
       .eq("owner_id", ownerId)
-      .maybeSingle();
-
+      .order("created_at", { ascending: false });
     if (error) return res.status(500).json({ error: error.message });
-    if (!condo) return res.json({ ok: true, condo: null });
-
-    // counts
-    const { count: totalRooms } = await supabaseAdmin
-      .schema("public")
-      .from("rooms")
-      .select("*", { count: "exact", head: true })
-      .eq("condo_id", condo.id);
-
-    const { count: occupiedRooms } = await supabaseAdmin
-      .schema("public")
-      .from("rooms")
-      .select("*", { count: "exact", head: true })
-      .eq("condo_id", condo.id)
-      .eq("status", "OCCUPIED");
-
-    const tr = Number(totalRooms || 0);
-    const or = Number(occupiedRooms || 0);
-
-    return res.json({
-      ok: true,
-      condo: {
+    if (!condos || condos.length === 0) return res.json({ ok: true, condo: null, condos: [] });
+    // ส่งทั้ง array + ตัวแรกเป็น default (backward compatible)
+    const items = [];
+    for (const condo of condos) {
+      const { count: totalRooms } = await supabaseAdmin
+        .schema("public")
+        .from("rooms")
+        .select("*", { count: "exact", head: true })
+        .eq("condo_id", condo.id);
+      const { count: occupiedRooms } = await supabaseAdmin
+        .schema("public")
+        .from("rooms")
+        .select("*", { count: "exact", head: true })
+        .eq("condo_id", condo.id)
+        .eq("status", "OCCUPIED");
+      const tr = Number(totalRooms || 0);
+      const or = Number(occupiedRooms || 0);
+      items.push({
         id: condo.id,
         nameTh: condo.name_th,
         floorCount: condo.floor_count,
         totalRooms: tr,
         occupiedRooms: or,
         vacantRooms: Math.max(tr - or, 0),
-      },
+      });
+    }
+    return res.json({
+      ok: true,
+      condo: items[0],   // backward compatible
+      condos: items,      // ✅ array ทั้งหมด
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "server_error" });
