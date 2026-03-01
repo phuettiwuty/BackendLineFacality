@@ -34,7 +34,7 @@ app.use(
       "Pragma",
       "pragma",
     ],
-    methods: ["GET", "POST", "PATCH", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "OPTIONS"],
   })
 );
 app.options("*", cors());
@@ -2412,6 +2412,8 @@ console.log("Routes ready:", [
   "POST /tenant/facility-bookings/:id/check-in",
   "POST /tenant/facility-bookings/:id/cancel",
   "POST /tenant/facility-bookings/:id/finish",
+  "PUT /api/v1/condos/:condoId/rooms/access-code",
+  "POST /api/v1/tenant/link-room",
 ]);
 
 const PORT = Number(process.env.PORT || 3001);
