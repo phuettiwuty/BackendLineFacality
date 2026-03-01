@@ -1596,6 +1596,34 @@ app.get("/admin/tenants", requireAdmin, async (req, res) => {
   }
 });
 
+// PATCH /tenant/profile — อัพเดตชื่อ/โทร/เมลของ tenant
+app.patch("/tenant/profile", requireLineLogin, async (req, res) => {
+  try {
+    const dormUserId = req.user.dorm_user_id;
+    const updates = {};
+    if (req.body?.full_name) updates.full_name = String(req.body.full_name).trim();
+    if (req.body?.phone) updates.phone = String(req.body.phone).trim();
+    if (req.body?.email) updates.email = String(req.body.email).trim();
+
+    if (Object.keys(updates).length === 0)
+      return res.status(400).json({ error: "no_fields" });
+
+    const { data, error } = await supabaseAdmin
+      .from("dorm_users")
+      .update(updates)
+      .eq("id", dormUserId)
+      .select("id, full_name, phone, email, room")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, user: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
+
 /* =========================
    Parcels (Admin create + Tenant view/pickup)
    ========================= */
