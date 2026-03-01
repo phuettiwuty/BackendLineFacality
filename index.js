@@ -130,11 +130,14 @@ function addMinutes(d, mins) {
 }
 
 const emailTransporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD,
   },
+  family: 4,  // ✅ บังคับ IPv4 (แก้ ENETUNREACH บน Render)
 });
 
 async function sendEmailMock(to, subject, text) {
