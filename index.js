@@ -34,7 +34,7 @@ app.use(
       "Pragma",
       "pragma",
     ],
-    methods: ["GET", "POST", "PUT", "PATCH", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH","DELETE", "OPTIONS"],
   })
 );
 app.options("*", cors());
