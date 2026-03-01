@@ -1128,25 +1128,20 @@ app.post("/api/v1/tenant/link-room", async (req, res) => {
 
     if (existingDorm) {
       // อัพเดต room + full_name
-      await supabaseAdmin
-        .schema("public")
-        .from("dorm_users")
-        .update({
-          room: room.room_no || null,
-          full_name: room.tenant_name || existingDorm.full_name || "ผู้เช่า",
-        })
-        .eq("id", existingDorm.id);
+      await supabaseAdmin.from("dorm_users").update({
+      room: room.room_no || null,
+       full_name: room.tenant_name || existingDorm.full_name || "ผู้เช่า",
+        condo_id: room.condo_id,   // ✅ เพิ่มนี้
+      }).eq("id", existingDorm.id);
     } else {
       // สร้างใหม่
-      await supabaseAdmin
-        .schema("public")
-        .from("dorm_users")
-        .insert([{
-          code: trimmed,
-          full_name: room.tenant_name || "ผู้เช่า",
-          line_user_id: String(lineUserId),
-          room: room.room_no || null,
-        }]);
+      await supabaseAdmin.from("dorm_users").insert([{
+  code: trimmed,
+  full_name: room.tenant_name || "ผู้เช่า",
+  line_user_id: String(lineUserId),
+  room: room.room_no || null,
+  condo_id: room.condo_id,   // ✅ เพิ่มนี้
+}]);
     }
 
     return res.json({
@@ -1587,13 +1582,13 @@ async function pushLineByDormUserId(dormUserId, payload) {
    ========================= */
 app.get("/admin/tenants", requireAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .schema("public")
-      .from("dorm_users")
+    const { condoId } = req.query;
+    let q = supabaseAdmin.from("dorm_users")
       .select("id, full_name, room, phone, email, line_user_id, registered_at")
       .not("line_user_id", "is", null)
       .order("registered_at", { ascending: false });
-
+    if (condoId) q = q.eq("condo_id", condoId);
+    const { data, error } = await q;
     if (error) return res.status(500).json({ error: pickErr(error) });
     return res.json({ ok: true, items: data || [] });
   } catch (e) {
@@ -1754,26 +1749,27 @@ app.patch("/parcels/:id/pickup", async (req, res) => {
 // ===== admin: ประวัติการแจ้งพัสดุ =====
 app.get("/admin/parcel/history", requireAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .schema("public")
-      .from("parcels")
-      .select("id, dorm_user_id, note, image_url, created_at, status, dorm_users(full_name, room)")
-      .order("created_at", { ascending: false })
-      .limit(200);
-
+    const { condoId } = req.query;
+    let q = supabaseAdmin.from("parcels")
+      .select("id, dorm_user_id, note, image_url, created_at, status, dorm_users(full_name, room, condo_id)")
+      .order("created_at", { ascending: false }).limit(200);
+    const { data, error } = await q;
     if (error) return res.status(500).json({ error: pickErr(error) });
-
-    const items = (data || []).map((p) => ({
-      id: p.id,
-      dormUserId: p.dorm_user_id,
+    let items = (data || []).map((p) => ({
+      id: p.id, dormUserId: p.dorm_user_id,
       tenantName: p.dorm_users?.full_name || "-",
       room: p.dorm_users?.room || null,
-      note: p.note || null,
-      imageUrl: p.image_url || null,
-      createdAt: p.created_at,
-      status: p.status || "sent",
+      note: p.note || null, imageUrl: p.image_url || null,
+      createdAt: p.created_at, status: p.status || "sent",
     }));
-
+    // filter by condoId client-side (via join)
+    if (condoId) {
+      const duIds = new Set();
+      for (const p of data || []) {
+        if (p.dorm_users?.condo_id === condoId) duIds.add(p.dorm_user_id);
+      }
+      items = items.filter(i => duIds.has(i.dormUserId));
+    }
     return res.json({ ok: true, items });
   } catch (e) {
     return res.status(500).json({ error: pickErr(e) });
@@ -1785,19 +1781,21 @@ app.get("/admin/parcel/history", requireAdmin, async (req, res) => {
    ========================= */
 app.get("/admin/repairs", requireAdmin, async (req, res) => {
   try {
-    const { status } = req.query;
-
-    let q = supabaseAdmin
-      .schema("public")
-      .from("repair_request")
+    const { status, condoId } = req.query;
+    // ถ้ามี condoId → หา dorm_user_ids ที่อยู่คอนโดนั้น
+    let dormUserIds = null;
+    if (condoId) {
+      const { data: dus } = await supabaseAdmin
+        .from("dorm_users").select("id").eq("condo_id", condoId);
+      dormUserIds = (dus || []).map(d => d.id);
+    }
+    let q = supabaseAdmin.from("repair_request")
       .select("id, created_at, problem_type, description, status, location, room, image_url, line_user_id")
       .order("created_at", { ascending: false });
-
     if (status) q = q.eq("status", String(status));
-
+    if (dormUserIds) q = q.in("dorm_user_id", dormUserIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ error: pickErr(error) });
-
     return res.json({ ok: true, items: data || [] });
   } catch (e) {
     return res.status(500).json({ error: e.message || "server error" });
