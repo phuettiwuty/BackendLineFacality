@@ -625,6 +625,29 @@ app.get("/api/v1/condos/mine", authRequired, async (req, res) => {
   }
 });
 
+// DELETE /api/v1/condos/:condoId — ลบคอนโด + ห้องที่ผูกอยู่
+app.delete("/api/v1/condos/:condoId", authRequired, async (req, res) => {
+  try {
+    const condoId = req.params.condoId;
+    const ownerId = req.ownerId;
+
+    // ตรวจว่าเป็นเจ้าของจริง
+    const { data: condo } = await supabaseAdmin
+      .from("condos").select("id").eq("id", condoId).eq("owner_id", ownerId).maybeSingle();
+    if (!condo) return res.status(404).json({ error: "not_found" });
+
+    // ลบห้องก่อน
+    await supabaseAdmin.from("rooms").delete().eq("condo_id", condoId);
+    // ลบคอนโด
+    await supabaseAdmin.from("condos").delete().eq("id", condoId);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
 app.post("/api/v1/condos/:condoId/services", authRequired, async (req, res) => {
   try {
     const ownerId = req.ownerId;
