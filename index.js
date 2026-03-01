@@ -7,6 +7,7 @@
 // - ใช้ขอบเขตวันแบบ explicit +07:00 (ไม่ลบ 7 ชั่วโมงซ้ำ)
 // - availability key HH:mm ใช้ Asia/Bangkok เสถียร ไม่ขึ้นกับ timezone เครื่อง
 // - เพิ่ม route cancel ใน Routes ready
+import nodemailer from "nodemailer";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import express from "express";
@@ -128,45 +129,33 @@ function addMinutes(d, mins) {
   return new Date(d.getTime() + mins * 60 * 1000);
 }
 
+const emailTransporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+});
+
 async function sendEmailMock(to, subject, text) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.log("[EMAIL MOCK - no RESEND_API_KEY]", { to, subject, text });
+  const code = text.match(/\d{6}/)?.[0] || text;
+  if (!process.env.GMAIL_USER) {
+    console.log("[EMAIL MOCK]", { to, subject, text });
     return;
   }
-
-  const code = text.match(/\d{6}/)?.[0] || text;
-
   try {
-    const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        from: "RentSphere <onboarding@resend.dev>",
-        to: [to],
-        subject,
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;border:1px solid #e0e0e0;border-radius:16px">
-            <h2 style="color:#3b82f6;margin:0 0 16px">🏢 RentSphere</h2>
-            <p style="font-size:14px;color:#666">${subject}</p>
-            <div style="margin:24px 0;padding:20px;background:#f0f4ff;border-radius:12px;text-align:center">
-              <div style="font-size:36px;font-weight:900;letter-spacing:8px;color:#1e40af">${code}</div>
-            </div>
-            <p style="font-size:12px;color:#999;text-align:center">รหัสนี้จะหมดอายุใน 15 นาที</p>
-          </div>
-        `,
-      }),
+    await emailTransporter.sendMail({
+      from: `"RentSphere" <${process.env.GMAIL_USER}>`,
+      to,
+      subject,
+      html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;border:1px solid #e0e0e0;border-radius:16px"><h2 style="color:#3b82f6;margin:0 0 16px">🏢 RentSphere</h2><p style="font-size:14px;color:#666">${subject}</p><div style="margin:24px 0;padding:20px;background:#f0f4ff;border-radius:12px;text-align:center"><div style="font-size:36px;font-weight:900;letter-spacing:8px;color:#1e40af">${code}</div></div><p style="font-size:12px;color:#999;text-align:center">รหัสนี้จะหมดอายุใน 15 นาที</p></div>`,
     });
-
-    const result = await r.json();
-    console.log("[RESEND]", r.ok ? "SENT" : "FAIL", result);
+    console.log("[EMAIL SENT]", { to, subject });
   } catch (e) {
-    console.error("[RESEND ERROR]", e.message);
+    console.error("[EMAIL ERROR]", e.message);
   }
 }
+
 
 
 /** สร้าง JWT */
