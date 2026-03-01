@@ -130,32 +130,36 @@ function addMinutes(d, mins) {
 
 
 async function sendEmailMock(to, subject, text) {
-  const apiKey = process.env.RESEND_API_KEY;
+  const apiKey = process.env.BREVO_API_KEY;
   if (!apiKey) {
     console.log("[EMAIL MOCK]", { to, subject, text });
     return;
   }
+
   const code = text.match(/\d{6}/)?.[0] || text;
+
   try {
-    const r = await fetch("https://api.resend.com/emails", {
+    const r = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        "api-key": apiKey,
       },
       body: JSON.stringify({
-        from: "RentSphere <onboarding@resend.dev>",
-        to: [to],
+        sender: { name: "RentSphere", email: "renspheres@gmail.com" },
+        to: [{ email: to }],
         subject,
-        html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;border:1px solid #e0e0e0;border-radius:16px"><h2 style="color:#3b82f6;margin:0 0 16px">🏢 RentSphere</h2><p style="font-size:14px;color:#666">${subject}</p><div style="margin:24px 0;padding:20px;background:#f0f4ff;border-radius:12px;text-align:center"><div style="font-size:36px;font-weight:900;letter-spacing:8px;color:#1e40af">${code}</div></div><p style="font-size:12px;color:#999;text-align:center">รหัสนี้จะหมดอายุใน 15 นาที</p></div>`,
+        htmlContent: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;border:1px solid #e0e0e0;border-radius:16px"><h2 style="color:#3b82f6;margin:0 0 16px">🏢 RentSphere</h2><p style="font-size:14px;color:#666">${subject}</p><div style="margin:24px 0;padding:20px;background:#f0f4ff;border-radius:12px;text-align:center"><div style="font-size:36px;font-weight:900;letter-spacing:8px;color:#1e40af">${code}</div></div><p style="font-size:12px;color:#999;text-align:center">รหัสนี้จะหมดอายุใน 15 นาที</p></div>`,
       }),
     });
+
     const result = await r.json();
-    console.log("[RESEND]", r.ok ? "SENT" : "FAIL", result);
+    console.log("[BREVO]", r.ok ? "SENT" : "FAIL", result);
   } catch (e) {
-    console.error("[RESEND ERROR]", e.message);
+    console.error("[BREVO ERROR]", e.message);
   }
 }
+
 
 
 
