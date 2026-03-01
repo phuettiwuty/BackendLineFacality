@@ -1922,19 +1922,46 @@ app.post("/admin/facilities", requireAdmin, async (req, res) => {
    =================================== */
 app.get("/tenant/facilities", requireLineLogin, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
+    // 1. หา code ของ tenant (ที่ใช้ลิงก์ห้อง)
+    const { data: du } = await supabaseAdmin
+      .from("dorm_users")
+      .select("code")
+      .eq("id", req.user.dorm_user_id)
+      .single();
+
+    let condoId = null;
+
+    if (du?.code) {
+      // 2. หาห้องที่ตรงกับ access_code → ได้ condo_id
+      const { data: room } = await supabaseAdmin
+        .from("rooms")
+        .select("condo_id")
+        .eq("access_code", du.code)
+        .maybeSingle();
+
+      condoId = room?.condo_id || null;
+    }
+
+    // 3. โหลด facilities (ถ้ามี condoId → เฉพาะคอนโดนั้น, ไม่มี → ทั้งหมด)
+    let q = supabaseAdmin
       .schema("public")
       .from("facilities")
       .select("*")
       .eq("active", true)
       .order("created_at", { ascending: false });
 
+    if (condoId) {
+      q = q.eq("condo_id", condoId);
+    }
+
+    const { data, error } = await q;
     if (error) return res.status(500).json({ error: pickErr(error) });
     return res.json({ ok: true, items: data || [] });
   } catch (e) {
     return res.status(500).json({ error: pickErr(e) });
   }
 });
+
 
 /** ✅ รายการจองของฉัน (วันเลือก) */
 app.get("/tenant/facility-bookings/my", requireLineLogin, async (req, res) => {
