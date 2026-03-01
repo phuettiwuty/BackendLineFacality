@@ -34,7 +34,7 @@ app.use(
       "Pragma",
       "pragma",
     ],
-    methods: ["GET", "POST", "PUT", "PATCH","DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
 );
 app.options("*", cors());
@@ -79,7 +79,6 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 const VERIFY_EXPIRES_MIN = Number(process.env.VERIFY_EXPIRES_MIN || 15);
 const RESET_EXPIRES_MIN = Number(process.env.RESET_EXPIRES_MIN || 15);
-
 
 
 function authRequired(req, res, next) {
@@ -687,7 +686,7 @@ function hhmmBangkokFromISO(iso) {
    Multer
    ========================= */
 const upload = multer({ storage: multer.memoryStorage() });
- ////// สร้างคอนโด
+////// สร้างคอนโด
 app.post("/api/v1/condos", authRequired, upload.single("logo"), async (req, res) => {
   try {
     const ownerId = req.ownerId;
@@ -751,7 +750,7 @@ app.get("/api/v1/condos/mine", authRequired, async (req, res) => {
     const { data: condos, error } = await supabaseAdmin
       .schema("public")
       .from("condos")
-      .select("id, name_th, floor_count")
+      .select("id, name_th, name_en, address_th, address_en, phone_number, tax_id, floor_count")
       .eq("owner_id", ownerId)
       .order("created_at", { ascending: false });
     if (error) return res.status(500).json({ error: error.message });
@@ -770,15 +769,27 @@ app.get("/api/v1/condos/mine", authRequired, async (req, res) => {
         .select("*", { count: "exact", head: true })
         .eq("condo_id", condo.id)
         .eq("status", "OCCUPIED");
+      const { count: unpaidBills } = await supabaseAdmin
+        .schema("public")
+        .from("invoices")
+        .select("*", { count: "exact", head: true })
+        .eq("condo_id", condo.id)
+        .eq("status", "UNPAID");
       const tr = Number(totalRooms || 0);
       const or = Number(occupiedRooms || 0);
       items.push({
         id: condo.id,
         nameTh: condo.name_th,
+        nameEn: condo.name_en,
+        addressTh: condo.address_th,
+        addressEn: condo.address_en,
+        phoneNumber: condo.phone_number,
+        taxId: condo.tax_id,
         floorCount: condo.floor_count,
         totalRooms: tr,
         occupiedRooms: or,
         vacantRooms: Math.max(tr - or, 0),
+        unpaidBills: Number(unpaidBills || 0),
       });
     }
     return res.json({
@@ -813,6 +824,103 @@ app.delete("/api/v1/condos/:condoId", authRequired, async (req, res) => {
   }
 });
 
+// ===== GET routes สำหรับโหลดข้อมูลแสดง Frontend =====
+
+// GET /api/v1/condos/:condoId — ข้อมูลคอนโด (Step 0)
+app.get("/api/v1/condos/:condoId", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .select("*")
+      .eq("id", condoId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: "condo_not_found" });
+
+    return res.json({ ok: true, condo: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// GET /api/v1/condos/:condoId/services — บริการเสริม (Step 1)
+app.get("/api/v1/condos/:condoId/services", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_services")
+      .select("*")
+      .eq("condo_id", condoId)
+      .order("created_at", { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, services: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// GET /api/v1/condos/:condoId/utilities — ค่าน้ำ/ไฟ (Step 2)
+app.get("/api/v1/condos/:condoId/utilities", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_utility_configs")
+      .select("*")
+      .eq("condo_id", condoId);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, configs: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// GET /api/v1/condos/:condoId/bank-accounts — บัญชีธนาคาร (Step 3)
+app.get("/api/v1/condos/:condoId/bank-accounts", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_bank_accounts")
+      .select("*")
+      .eq("condo_id", condoId)
+      .order("created_at", { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, accounts: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
 
 app.post("/api/v1/condos/:condoId/services", authRequired, async (req, res) => {
   try {
@@ -2108,7 +2216,7 @@ app.post("/tenant/facility-bookings", requireLineLogin, async (req, res) => {
       .eq("dorm_user_id", dormUserId)
       .gte("start_at", dayStart.toISOString())
       .lt("start_at", dayEnd.toISOString())
-       .in("status", ["booked", "active"]);
+      .in("status", ["booked", "active"]);
 
     if (dayErr) return res.status(500).json({ error: pickErr(dayErr) });
 
@@ -2651,6 +2759,473 @@ app.post("/admin/facility-bookings/:id/cancel", requireAdmin, async (req, res) =
     return res.json({ ok: true, item: updated });
   } catch (e) {
     return res.status(500).json({ error: pickErr(e) });
+  }
+});
+
+/* =========================
+   Dashboard Series 12 เดือน
+   ========================= */
+
+// GET /api/v1/condos/:id/dashboard/series12 — กราฟรายได้ 12 เดือนย้อนหลัง
+app.get("/api/v1/condos/:id/dashboard/series12", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    // ช่วงเวลา 12 เดือนย้อนหลัง (Bangkok timezone)
+    const now = new Date();
+    const months = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1;
+      const startISO = new Date(`${year}-${String(month).padStart(2, "0")}-01T00:00:00+07:00`).toISOString();
+      const nextD = new Date(year, month, 1);
+      const endISO = new Date(`${nextD.getFullYear()}-${String(nextD.getMonth() + 1).padStart(2, "0")}-01T00:00:00+07:00`).toISOString();
+      months.push({ label: `${year}-${String(month).padStart(2, "0")}`, startISO, endISO });
+    }
+
+    const series = [];
+    for (const m of months) {
+      // นับยอดชำระจาก invoices ที่ paid_at อยู่ในเดือนนั้น
+      const { data: invoices, error } = await supabaseAdmin
+        .schema("public")
+        .from("invoices")
+        .select("total_amount")
+        .eq("condo_id", condoId)
+        .eq("status", "PAID")
+        .gte("paid_at", m.startISO)
+        .lt("paid_at", m.endISO);
+
+      if (error) return res.status(500).json({ error: error.message });
+
+      const revenue = (invoices || []).reduce((sum, inv) => sum + Number(inv.total_amount || 0), 0);
+      series.push({ month: m.label, revenue });
+    }
+
+    return res.json({ ok: true, series });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+/* =========================
+   Billing Reports
+   ========================= */
+
+// GET /api/v1/condos/:id/billing-reports — รายงานบิลทั้งหมด (ReportsPage)
+app.get("/api/v1/condos/:id/billing-reports", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const status = req.query.status || null;  // UNPAID | PAID | OVERDUE
+    const month = req.query.month || null;  // YYYY-MM
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Number(req.query.limit || 20));
+    const offset = (page - 1) * limit;
+
+    let query = supabaseAdmin
+      .schema("public")
+      .from("invoices")
+      .select(
+        "id, room_id, condo_id, status, total_amount, due_date, paid_at, created_at, rooms(room_no, floor)",
+        { count: "exact" }
+      )
+      .eq("condo_id", condoId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (status) query = query.eq("status", status.toUpperCase());
+    if (month) {
+      const startISO = new Date(`${month}-01T00:00:00+07:00`).toISOString();
+      const [y, m2] = month.split("-").map(Number);
+      const next = new Date(y, m2, 1);
+      const endISO = new Date(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-01T00:00:00+07:00`).toISOString();
+      query = query.gte("created_at", startISO).lt("created_at", endISO);
+    }
+
+    const { data, error, count } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      total: count || 0,
+      page,
+      limit,
+      reports: (data || []).map(inv => ({
+        id: inv.id,
+        roomId: inv.room_id,
+        roomNo: inv.rooms?.room_no,
+        floor: inv.rooms?.floor,
+        status: inv.status,
+        totalAmount: inv.total_amount,
+        dueDate: inv.due_date,
+        paidAt: inv.paid_at,
+        createdAt: inv.created_at,
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+/* =========================
+   Meters (มิเตอร์น้ำ/ไฟ)
+   ========================= */
+
+// GET /api/v1/condos/:id/meters — ดึงข้อมูลมิเตอร์ล่าสุดของทุกห้อง
+app.get("/api/v1/condos/:id/meters", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const type = req.query.type || null; // water | electricity
+    const roomId = req.query.roomId || null;
+    const month = req.query.month || null; // YYYY-MM
+
+    let query = supabaseAdmin
+      .schema("public")
+      .from("meter_readings")
+      .select("id, room_id, condo_id, type, previous_reading, current_reading, units_used, recorded_at, rooms(room_no, floor)")
+      .eq("condo_id", condoId)
+      .order("recorded_at", { ascending: false });
+
+    if (type) query = query.eq("type", type.toLowerCase());
+    if (roomId) query = query.eq("room_id", roomId);
+    if (month) {
+      const startISO = new Date(`${month}-01T00:00:00+07:00`).toISOString();
+      const [y, m2] = month.split("-").map(Number);
+      const next = new Date(y, m2, 1);
+      const endISO = new Date(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-01T00:00:00+07:00`).toISOString();
+      query = query.gte("recorded_at", startISO).lt("recorded_at", endISO);
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      meters: (data || []).map(m => ({
+        id: m.id,
+        roomId: m.room_id,
+        roomNo: m.rooms?.room_no,
+        floor: m.rooms?.floor,
+        type: m.type,
+        previousReading: m.previous_reading,
+        currentReading: m.current_reading,
+        unitsUsed: m.units_used,
+        recordedAt: m.recorded_at,
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// POST /api/v1/condos/:id/meters — บันทึกมิเตอร์ใหม่
+app.post("/api/v1/condos/:id/meters", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const room_id = String(req.body?.roomId || "").trim();
+    const type = String(req.body?.type || "").toLowerCase(); // water | electricity
+    const previous_reading = Number(req.body?.previousReading ?? 0);
+    const current_reading = Number(req.body?.currentReading ?? 0);
+    const recorded_at = req.body?.recordedAt || new Date().toISOString();
+
+    if (!room_id) return res.status(400).json({ error: "roomId_required" });
+    if (!["water", "electricity"].includes(type)) return res.status(400).json({ error: "type_must_be_water_or_electricity" });
+    if (current_reading < previous_reading) return res.status(400).json({ error: "current_reading_must_be_gte_previous" });
+
+    const units_used = current_reading - previous_reading;
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("meter_readings")
+      .insert([{ condo_id: condoId, room_id, type, previous_reading, current_reading, units_used, recorded_at }])
+      .select("*")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.status(201).json({ ok: true, meter: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+/* =========================
+   Invoices (หน้าแจ้งชำระ + หน้ารายงาน)
+   ========================= */
+
+// GET /api/v1/condos/:id/invoices — ดึงบิลทั้งหมด (หน้าแจ้งชำระ + หน้ารายงาน)
+// query: ?status=UNPAID|PAID|OVERDUE&month=YYYY-MM&roomId=xxx&page=1&limit=20
+app.get("/api/v1/condos/:id/invoices", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const status = req.query.status || null;
+    const month = req.query.month || null; // YYYY-MM
+    const roomId = req.query.roomId || null;
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Number(req.query.limit || 20));
+    const offset = (page - 1) * limit;
+
+    let query = supabaseAdmin
+      .schema("public")
+      .from("invoices")
+      .select(
+        "id, room_id, condo_id, status, total_amount, due_date, paid_at, note, created_at, updated_at, rooms(room_no, floor)",
+        { count: "exact" }
+      )
+      .eq("condo_id", condoId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (status) query = query.eq("status", status.toUpperCase());
+    if (roomId) query = query.eq("room_id", roomId);
+    if (month) {
+      const startISO = new Date(`${month}-01T00:00:00+07:00`).toISOString();
+      const [y, m2] = month.split("-").map(Number);
+      const next = new Date(y, m2, 1);
+      const endISO = new Date(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-01T00:00:00+07:00`).toISOString();
+      query = query.gte("created_at", startISO).lt("created_at", endISO);
+    }
+
+    const { data, error, count } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      total: count || 0,
+      page,
+      limit,
+      invoices: (data || []).map(inv => ({
+        id: inv.id,
+        roomId: inv.room_id,
+        roomNo: inv.rooms?.room_no,
+        floor: inv.rooms?.floor,
+        status: inv.status,
+        totalAmount: inv.total_amount,
+        dueDate: inv.due_date,
+        paidAt: inv.paid_at,
+        note: inv.note,
+        createdAt: inv.created_at,
+        updatedAt: inv.updated_at,
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// GET /api/v1/condos/:id/invoices/:invoiceId — ดูรายละเอียดบิลเดียว
+app.get("/api/v1/condos/:id/invoices/:invoiceId", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+    const invoiceId = req.params.invoiceId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("invoices")
+      .select("*, rooms(room_no, floor)")
+      .eq("id", invoiceId)
+      .eq("condo_id", condoId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: "invoice_not_found" });
+
+    return res.json({
+      ok: true, invoice: {
+        id: data.id,
+        roomId: data.room_id,
+        roomNo: data.rooms?.room_no,
+        floor: data.rooms?.floor,
+        status: data.status,
+        totalAmount: data.total_amount,
+        dueDate: data.due_date,
+        paidAt: data.paid_at,
+        note: data.note,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// POST /api/v1/condos/:id/invoices — สร้างบิลใหม่ (หน้าแจ้งชำระ)
+// body: { roomId, totalAmount, dueDate, note? }
+app.post("/api/v1/condos/:id/invoices", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const room_id = String(req.body?.roomId || "").trim();
+    const total_amount = Number(req.body?.totalAmount ?? 0);
+    const due_date = req.body?.dueDate || null; // YYYY-MM-DD
+    const note = req.body?.note || null;
+
+    if (!room_id) return res.status(400).json({ error: "roomId_required" });
+    if (total_amount <= 0) return res.status(400).json({ error: "totalAmount_must_be_positive" });
+
+    // ตรวจว่าห้องอยู่ในคอนโดนี้จริง
+    const { data: room } = await supabaseAdmin
+      .schema("public").from("rooms")
+      .select("id").eq("id", room_id).eq("condo_id", condoId).maybeSingle();
+    if (!room) return res.status(404).json({ error: "room_not_found_in_condo" });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("invoices")
+      .insert([{ condo_id: condoId, room_id, total_amount, due_date, note, status: "UNPAID" }])
+      .select("*, rooms(room_no, floor)")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.status(201).json({
+      ok: true, invoice: {
+        id: data.id,
+        roomId: data.room_id,
+        roomNo: data.rooms?.room_no,
+        floor: data.rooms?.floor,
+        status: data.status,
+        totalAmount: data.total_amount,
+        dueDate: data.due_date,
+        note: data.note,
+        createdAt: data.created_at,
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// PATCH /api/v1/condos/:id/invoices/:invoiceId/pay — บันทึกการชำระ (หน้าแจ้งชำระ)
+app.patch("/api/v1/condos/:id/invoices/:invoiceId/pay", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+    const invoiceId = req.params.invoiceId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const paid_at = req.body?.paidAt || new Date().toISOString();
+    const note = req.body?.note || null;
+
+    const { data: existing } = await supabaseAdmin
+      .schema("public").from("invoices")
+      .select("id, status").eq("id", invoiceId).eq("condo_id", condoId).maybeSingle();
+
+    if (!existing) return res.status(404).json({ error: "invoice_not_found" });
+    if (existing.status === "PAID") return res.json({ ok: true, already_paid: true });
+    if (existing.status === "CANCELLED") return res.status(400).json({ error: "invoice_cancelled" });
+
+    const updates = { status: "PAID", paid_at, updated_at: new Date().toISOString() };
+    if (note) updates.note = note;
+
+    const { data, error } = await supabaseAdmin
+      .schema("public").from("invoices")
+      .update(updates)
+      .eq("id", invoiceId).eq("condo_id", condoId)
+      .select("id, status, paid_at, total_amount, updated_at")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, invoice: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// PATCH /api/v1/condos/:id/invoices/:invoiceId/overdue — ทำเครื่องหมายค้างชำระ
+app.patch("/api/v1/condos/:id/invoices/:invoiceId/overdue", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+    const invoiceId = req.params.invoiceId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data: existing } = await supabaseAdmin
+      .schema("public").from("invoices")
+      .select("id, status").eq("id", invoiceId).eq("condo_id", condoId).maybeSingle();
+
+    if (!existing) return res.status(404).json({ error: "invoice_not_found" });
+    if (existing.status === "PAID") return res.status(400).json({ error: "already_paid" });
+    if (existing.status === "CANCELLED") return res.status(400).json({ error: "invoice_cancelled" });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public").from("invoices")
+      .update({ status: "OVERDUE", updated_at: new Date().toISOString() })
+      .eq("id", invoiceId).eq("condo_id", condoId)
+      .select("id, status, updated_at")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, invoice: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// DELETE /api/v1/condos/:id/invoices/:invoiceId — ยกเลิกบิล
+app.delete("/api/v1/condos/:id/invoices/:invoiceId", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+    const invoiceId = req.params.invoiceId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data: existing } = await supabaseAdmin
+      .schema("public").from("invoices")
+      .select("id, status").eq("id", invoiceId).eq("condo_id", condoId).maybeSingle();
+
+    if (!existing) return res.status(404).json({ error: "invoice_not_found" });
+    if (existing.status === "PAID") return res.status(400).json({ error: "cannot_cancel_paid_invoice" });
+
+    const { error } = await supabaseAdmin
+      .schema("public").from("invoices")
+      .update({ status: "CANCELLED", updated_at: new Date().toISOString() })
+      .eq("id", invoiceId).eq("condo_id", condoId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
 
