@@ -870,6 +870,114 @@ app.get("/api/v1/condos/:condoId/rooms", authRequired, async (req, res) => {
     return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
+// ===== บันทึก access code ลงห้อง =====
+app.put("/api/v1/condos/:condoId/rooms/access-code", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { roomId, accessCode, tenantName } = req.body || {};
+    if (!roomId || !accessCode) return res.status(400).json({ error: "roomId and accessCode required" });
+
+    const { error } = await supabaseAdmin
+      .schema("public")
+      .from("rooms")
+      .update({
+        access_code: String(accessCode),
+        tenant_name: tenantName ? String(tenantName) : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", roomId)
+      .eq("condo_id", condoId);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// ===== ผู้เช่าใส่ access code เพื่อผูก LINE กับห้อง =====
+app.post("/api/v1/tenant/link-room", async (req, res) => {
+  try {
+    const { accessCode, lineUserId } = req.body || {};
+    if (!accessCode) return res.status(400).json({ error: "accessCode required" });
+    if (!lineUserId) return res.status(400).json({ error: "lineUserId required" });
+
+    const trimmed = String(accessCode).trim();
+
+    // หาห้องที่ตรงกับ access code
+    const { data: room, error: roomErr } = await supabaseAdmin
+      .schema("public")
+      .from("rooms")
+      .select("id, room_no, floor, condo_id, tenant_name, access_code, status")
+      .eq("access_code", trimmed)
+      .maybeSingle();
+
+    if (roomErr) return res.status(500).json({ error: roomErr.message });
+    if (!room) return res.status(404).json({ error: "invalid_code" });
+
+    // ดึงข้อมูลคอนโด
+    const { data: condo } = await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .select("id, name_th")
+      .eq("id", room.condo_id)
+      .maybeSingle();
+
+    // สร้าง/อัพเดต dorm_user ผู้เช่า (ใช้ access code เป็น code)
+    const { data: existingDorm } = await supabaseAdmin
+      .schema("public")
+      .from("dorm_users")
+      .select("id, line_user_id")
+      .eq("line_user_id", String(lineUserId))
+      .maybeSingle();
+
+    if (existingDorm) {
+      // อัพเดต room + full_name
+      await supabaseAdmin
+        .schema("public")
+        .from("dorm_users")
+        .update({
+          room: room.room_no || null,
+          full_name: room.tenant_name || existingDorm.full_name || "ผู้เช่า",
+        })
+        .eq("id", existingDorm.id);
+    } else {
+      // สร้างใหม่
+      await supabaseAdmin
+        .schema("public")
+        .from("dorm_users")
+        .insert([{
+          code: trimmed,
+          full_name: room.tenant_name || "ผู้เช่า",
+          line_user_id: String(lineUserId),
+          room: room.room_no || null,
+        }]);
+    }
+
+    return res.json({
+      ok: true,
+      roomId: room.id,
+      roomNo: room.room_no,
+      floor: room.floor,
+      condoId: room.condo_id,
+      condoName: condo?.name_th || "RentSphere",
+      tenantName: room.tenant_name || "ผู้เช่า",
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
+
+
 /* ===================================
    ========== DORM + LINE LOGIN =======
    =================================== */
