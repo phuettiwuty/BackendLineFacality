@@ -1163,6 +1163,43 @@ app.post("/api/v1/tenant/link-room", async (req, res) => {
   }
 });
 
+// GET facilities ของ condo
+app.get("/api/v1/condos/:condoId/facilities", authRequired, async (req, res) => {
+  const own = await assertOwnsCondo(req.ownerId, req.params.condoId);
+  if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+  const { data, error } = await supabaseAdmin
+    .from("facilities").select("*").eq("condo_id", req.params.condoId)
+    .order("created_at", { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ ok: true, items: data || [] });
+});
+
+// POST สร้าง facility ใหม่
+app.post("/api/v1/condos/:condoId/facilities", authRequired, async (req, res) => {
+  const own = await assertOwnsCondo(req.ownerId, req.params.condoId);
+  if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+  const { name, type, capacity, open_time, close_time, slot_minutes,
+          is_auto_approve, description, active } = req.body || {};
+  if (!name) return res.status(400).json({ error: "name required" });
+
+  const { data, error } = await supabaseAdmin
+    .from("facilities").insert([{
+      condo_id: req.params.condoId, name,
+      type: type || "sport", capacity: Number(capacity || 10),
+      open_time, close_time,
+      slot_minutes: Number(slot_minutes || 60),
+      is_auto_approve: Boolean(is_auto_approve ?? true),
+      description: description || null,
+      active: active !== false,
+    }]).select("*").single();
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ ok: true, item: data });
+});
+
+
+
 
 
 
