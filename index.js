@@ -491,6 +491,142 @@ app.post("/api/v1/auth/password/reset", async (req, res) => {
     return res.status(500).json({ error: pickErr(e) });
   }
 });
+
+/* =========================
+   Condo Staff (เจ้าหน้าที่ของคอนโด)
+   ========================= */
+
+// GET /api/v1/condos/:condoId/users — ดึงเจ้าหน้าที่ทั้งหมดของคอนโด
+app.get("/api/v1/condos/:condoId/users", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_staff")
+      .select("id, full_name, phone, email, role, created_at")
+      .eq("condo_id", condoId)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true, users: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// POST /api/v1/condos/:condoId/users — เพิ่มเจ้าหน้าที่
+app.post("/api/v1/condos/:condoId/users", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const full_name = String(req.body?.fullName || "").trim();
+    const phone = String(req.body?.phone || "").trim();
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const role = String(req.body?.role || "ADMIN").toUpperCase();
+
+    if (!full_name) return res.status(400).json({ error: "fullName_required" });
+    if (!phone) return res.status(400).json({ error: "phone_required" });
+    if (!email) return res.status(400).json({ error: "email_required" });
+    if (!["OWNER", "ADMIN"].includes(role)) return res.status(400).json({ error: "invalid_role" });
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_staff")
+      .insert([{ condo_id: condoId, full_name, phone, email, role }])
+      .select("id, full_name, phone, email, role, created_at")
+      .single();
+
+    if (error) {
+      // duplicate email ในคอนโดเดียวกัน
+      if (error.code === "23505") return res.status(409).json({ error: "email_already_exists_in_condo" });
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.status(201).json({ ok: true, user: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// PATCH /api/v1/condos/:condoId/users/:userId — แก้ไขเจ้าหน้าที่
+app.patch("/api/v1/condos/:condoId/users/:userId", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+    const userId = req.params.userId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const updates = {};
+    if (req.body?.fullName !== undefined) updates.full_name = String(req.body.fullName).trim();
+    if (req.body?.phone !== undefined) updates.phone = String(req.body.phone).trim();
+    if (req.body?.email !== undefined) updates.email = String(req.body.email).trim().toLowerCase();
+    if (req.body?.role !== undefined) {
+      const role = String(req.body.role).toUpperCase();
+      if (!["OWNER", "ADMIN"].includes(role)) return res.status(400).json({ error: "invalid_role" });
+      updates.role = role;
+    }
+
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: "no_fields_to_update" });
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_staff")
+      .update(updates)
+      .eq("id", userId)
+      .eq("condo_id", condoId)
+      .select("id, full_name, phone, email, role, updated_at")
+      .single();
+
+    if (error) {
+      if (error.code === "23505") return res.status(409).json({ error: "email_already_exists_in_condo" });
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data) return res.status(404).json({ error: "staff_not_found" });
+
+    return res.json({ ok: true, user: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// DELETE /api/v1/condos/:condoId/users/:userId — ลบเจ้าหน้าที่
+app.delete("/api/v1/condos/:condoId/users/:userId", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+    const userId = req.params.userId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { error } = await supabaseAdmin
+      .schema("public")
+      .from("condo_staff")
+      .delete()
+      .eq("id", userId)
+      .eq("condo_id", condoId);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
 /* =========================
    Helpers
    ========================= */
