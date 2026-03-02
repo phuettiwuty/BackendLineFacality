@@ -1692,14 +1692,11 @@ app.get("/admin/tenants", async (req, res) => {
   try {
     const { condoId } = req.query;
     let query = supabaseAdmin
-      .schema("public")
       .from("dorm_users")
       .select("*")
       .order("created_at", { ascending: false });
-    // ถ้ามี condoId → filter เฉพาะ tenant ที่อยู่ในห้องของคอนโดนี้
     if (condoId) {
       const { data: rooms } = await supabaseAdmin
-        .schema("public")
         .from("rooms")
         .select("room_no")
         .eq("condo_id", condoId);
@@ -1939,34 +1936,27 @@ app.get("/admin/parcel/history", async (req, res) => {
   try {
     const { condoId } = req.query;
 
+    // ⚠️ แก้ชื่อ table ตรงนี้ให้ตรงกับ Supabase จริง
     let query = supabaseAdmin
-      .schema("public")
-      .from("parcel_notifications")
+      .from("parcel_notification")
       .select("*")
       .order("created_at", { ascending: false });
 
-    // ถ้ามี condoId → filter เฉพาะ tenant ที่อยู่ในห้องของคอนโดนี้
     if (condoId) {
-      // หา dorm_user id ที่อยู่ในห้องของคอนโดนี้
       const { data: rooms } = await supabaseAdmin
-        .schema("public")
         .from("rooms")
         .select("room_no")
         .eq("condo_id", condoId);
 
       if (rooms && rooms.length > 0) {
         const roomNos = rooms.map(r => r.room_no).filter(Boolean);
-
-        // หา dorm_users ที่อยู่ในห้องเหล่านี้
         const { data: dormUsers } = await supabaseAdmin
-          .schema("public")
           .from("dorm_users")
           .select("id")
           .in("room", roomNos);
 
         if (dormUsers && dormUsers.length > 0) {
-          const dormUserIds = dormUsers.map(u => u.id);
-          query = query.in("dorm_user_id", dormUserIds);
+          query = query.in("dorm_user_id", dormUsers.map(u => u.id));
         } else {
           return res.json({ items: [] });
         }
@@ -1978,7 +1968,6 @@ app.get("/admin/parcel/history", async (req, res) => {
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
 
-    // map ให้ตรงกับ frontend
     const mapped = (data || []).map(row => ({
       id: row.id,
       dormUserId: row.dorm_user_id,
@@ -1997,6 +1986,7 @@ app.get("/admin/parcel/history", async (req, res) => {
 });
 
 
+
 /* =========================
    Admin Repairs
    ========================= */
@@ -2004,35 +1994,21 @@ app.get("/admin/parcel/history", async (req, res) => {
 app.get("/admin/repairs", async (req, res) => {
   try {
     const { status, condoId } = req.query;
-
     let query = supabaseAdmin
-      .schema("public")
-      .from("repair_requests")
+      .from("repair_request")
       .select("*")
       .order("created_at", { ascending: false });
-
-    // filter by status
     if (status) {
-      if (status === "new") {
-        query = query.eq("status", "new");
-      } else if (status === "in_progress") {
-        query = query.eq("status", "กำลังดำเนินงาน");
-      } else if (status === "done") {
-        query = query.eq("status", "เสร็จแล้ว");
-      } else if (status === "rejected") {
-        query = query.eq("status", "ปฏิเสธ");
-      }
+      if (status === "new")         query = query.eq("status", "new");
+      else if (status === "in_progress") query = query.eq("status", "กำลังดำเนินงาน");
+      else if (status === "done")   query = query.eq("status", "เสร็จแล้ว");
+      else if (status === "rejected") query = query.eq("status", "ปฏิเสธ");
     }
-
-    // filter by condoId — ดึงเฉพาะห้องที่อยู่ในคอนโดนี้
     if (condoId) {
-      // หาห้องทั้งหมดของคอนโด
       const { data: rooms } = await supabaseAdmin
-        .schema("public")
         .from("rooms")
         .select("room_no")
         .eq("condo_id", condoId);
-
       if (rooms && rooms.length > 0) {
         const roomNos = rooms.map(r => r.room_no).filter(Boolean);
         if (roomNos.length > 0) {
@@ -2044,10 +2020,8 @@ app.get("/admin/repairs", async (req, res) => {
         return res.json({ items: [] });
       }
     }
-
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
-
     return res.json({ items: data || [] });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "server_error" });
