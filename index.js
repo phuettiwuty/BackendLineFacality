@@ -1936,43 +1936,67 @@ app.get("/admin/parcel/history", async (req, res) => {
   try {
     const { condoId } = req.query;
 
-    // ⚠️ แก้ชื่อ table ตรงนี้ให้ตรงกับ Supabase จริง
-    let query = supabaseAdmin
-      .from("parcel_notification")
-      .select("*")
-      .order("created_at", { ascending: false });
-
+    // ถ้ามี condoId → หา dorm_user ที่อยู่ในคอนโดนี้
+    let dormUserFilter = null;
     if (condoId) {
       const { data: rooms } = await supabaseAdmin
         .from("rooms")
         .select("room_no")
         .eq("condo_id", condoId);
 
-      if (rooms && rooms.length > 0) {
-        const roomNos = rooms.map(r => r.room_no).filter(Boolean);
-        const { data: dormUsers } = await supabaseAdmin
-          .from("dorm_users")
-          .select("id")
-          .in("room", roomNos);
+      if (!rooms || rooms.length === 0) return res.json({ items: [] });
 
-        if (dormUsers && dormUsers.length > 0) {
-          query = query.in("dorm_user_id", dormUsers.map(u => u.id));
-        } else {
-          return res.json({ items: [] });
-        }
-      } else {
-        return res.json({ items: [] });
-      }
+      const roomNos = rooms.map(r => r.room_no).filter(Boolean);
+      if (roomNos.length === 0) return res.json({ items: [] });
+
+      const { data: dormUsers } = await supabaseAdmin
+        .from("dorm_users")
+        .select("id, full_name, room")
+        .in("room", roomNos);
+
+      if (!dormUsers || dormUsers.length === 0) return res.json({ items: [] });
+      dormUserFilter = dormUsers;
+    }
+
+    // query parcels
+    let query = supabaseAdmin
+      .from("parcels")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (dormUserFilter) {
+      const ids = dormUserFilter.map(u => u.id);
+      query = query.in("dorm_user_id", ids);
     }
 
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
 
+    // สร้าง map dorm_user_id → { full_name, room }
+    let dormMap = {};
+    if (dormUserFilter) {
+      for (const u of dormUserFilter) {
+        dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
+      }
+    } else {
+      // ไม่มี filter → ดึง dorm_users ทั้งหมดที่เกี่ยว
+      const dormIds = [...new Set((data || []).map(r => r.dorm_user_id).filter(Boolean))];
+      if (dormIds.length > 0) {
+        const { data: allDorm } = await supabaseAdmin
+          .from("dorm_users")
+          .select("id, full_name, room")
+          .in("id", dormIds);
+        for (const u of (allDorm || [])) {
+          dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
+        }
+      }
+    }
+
     const mapped = (data || []).map(row => ({
       id: row.id,
       dormUserId: row.dorm_user_id,
-      tenantName: row.tenant_name || "",
-      room: row.room || null,
+      tenantName: dormMap[row.dorm_user_id]?.name || "",
+      room: dormMap[row.dorm_user_id]?.room || null,
       note: row.note || null,
       imageUrl: row.image_url || null,
       createdAt: row.created_at,
@@ -1984,6 +2008,7 @@ app.get("/admin/parcel/history", async (req, res) => {
     return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
 
 
 
