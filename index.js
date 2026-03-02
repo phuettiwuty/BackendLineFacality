@@ -1703,6 +1703,39 @@ app.get("/admin/tenants", requireAdmin, async (req, res) => {
     return res.status(500).json({ error: e.message || "server error" });
   }
 });
+// DELETE /admin/terminate-contract — ยุติสัญญา (ลบ dorm_user + เปลี่ยนห้องเป็น VACANT)
+app.delete("/admin/terminate-contract", requireAdmin, async (req, res) => {
+  try {
+    const { dormUserId, roomId, condoId } = req.body || {};
+    if (!dormUserId) return res.status(400).json({ error: "dormUserId required" });
+    if (!roomId) return res.status(400).json({ error: "roomId required" });
+
+    // 1) ลบ dorm_user (ผู้เช่า)
+    const { error: delErr } = await supabaseAdmin
+      .from("dorm_users")
+      .delete()
+      .eq("id", dormUserId);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    // 2) เปลี่ยนห้องเป็น VACANT + เคลียร์ access_code, tenant_name
+    const { error: updErr } = await supabaseAdmin
+      .from("rooms")
+      .update({
+        status: "VACANT",
+        access_code: null,
+        tenant_name: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", roomId);
+    if (updErr) return res.status(500).json({ error: updErr.message });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
 
 // PATCH /tenant/profile — อัพเดตชื่อ/โทร/เมลของ tenant
 app.patch("/tenant/profile", requireLineLogin, async (req, res) => {
@@ -3267,6 +3300,7 @@ console.log("Routes ready:", [
   "POST /tenant/facility-bookings/:id/finish",
   "PUT /api/v1/condos/:condoId/rooms/access-code",
   "POST /api/v1/tenant/link-room",
+  "DELETE /admin/terminate-contract",
 ]);
 
 const PORT = Number(process.env.PORT || 3001);
