@@ -2909,6 +2909,86 @@ app.get("/api/v1/condos/:id/billing-reports", authRequired, async (req, res) => 
   }
 });
 
+
+// ===== Room Contracts สัญญา =====
+
+// POST /api/v1/condos/:condoId/contracts — บันทึกสัญญาใหม่
+app.post("/api/v1/condos/:condoId/contracts", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const b = req.body || {};
+    const roomId = String(b.roomId || "").trim();
+    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+
+    const { data, error } = await supabaseAdmin
+      .from("room_contracts")
+      .insert([{
+        condo_id: condoId,
+        room_id: roomId,
+        tenant_first_name: b.tenantFirstName || null,
+        tenant_last_name: b.tenantLastName || null,
+        tenant_phone: b.tenantPhone || null,
+        tenant_citizen_id: b.tenantCitizenId || null,
+        tenant_address: b.tenantAddress || null,
+        check_in: b.checkIn || null,
+        check_out: b.checkOut || null,
+        monthly_rent: Number(b.monthlyRent || 0),
+        deposit: Number(b.deposit || 0),
+        deposit_pay_by: b.depositPayBy || null,
+        booking_fee: Number(b.bookingFee || 0),
+        booking_no: b.bookingNo || null,
+        emergency_name: b.emergencyName || null,
+        emergency_relation: b.emergencyRelation || null,
+        emergency_phone: b.emergencyPhone || null,
+        note: b.note || null,
+        status: "ACTIVE",
+      }])
+      .select("*")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.status(201).json({ ok: true, contract: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// GET /api/v1/condos/:condoId/contracts?roomId=xxx — ดึงสัญญา ACTIVE ของห้อง
+app.get("/api/v1/condos/:condoId/contracts", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const roomId = req.query.roomId || null;
+    let q = supabaseAdmin
+      .from("room_contracts")
+      .select("*")
+      .eq("condo_id", condoId)
+      .eq("status", "ACTIVE")
+      .order("created_at", { ascending: false });
+
+    if (roomId) q = q.eq("room_id", roomId);
+
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      contract: (data && data[0]) || null,
+      contracts: data || [],
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
 /* =========================
    Meters (มิเตอร์น้ำ/ไฟ)
    ========================= */
