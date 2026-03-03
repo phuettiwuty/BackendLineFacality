@@ -1237,19 +1237,19 @@ app.post("/api/v1/tenant/link-room", async (req, res) => {
     if (existingDorm) {
       // อัพเดต room + full_name
       await supabaseAdmin.from("dorm_users").update({
-      room: room.room_no || null,
-       full_name: room.tenant_name || existingDorm.full_name || "ผู้เช่า",
+        room: room.room_no || null,
+        full_name: room.tenant_name || existingDorm.full_name || "ผู้เช่า",
         condo_id: room.condo_id,   // ✅ เพิ่มนี้
       }).eq("id", existingDorm.id);
     } else {
       // สร้างใหม่
       await supabaseAdmin.from("dorm_users").insert([{
-  code: trimmed,
-  full_name: room.tenant_name || "ผู้เช่า",
-  line_user_id: String(lineUserId),
-  room: room.room_no || null,
-  condo_id: room.condo_id,   // ✅ เพิ่มนี้
-}]);
+        code: trimmed,
+        full_name: room.tenant_name || "ผู้เช่า",
+        line_user_id: String(lineUserId),
+        room: room.room_no || null,
+        condo_id: room.condo_id,   // ✅ เพิ่มนี้
+      }]);
     }
 
     return res.json({
@@ -1284,7 +1284,7 @@ app.post("/api/v1/condos/:condoId/facilities", authRequired, async (req, res) =>
   if (!own.ok) return res.status(own.status).json({ error: own.error });
 
   const { name, type, capacity, open_time, close_time, slot_minutes,
-          is_auto_approve, description, active } = req.body || {};
+    is_auto_approve, description, active } = req.body || {};
   if (!name) return res.status(400).json({ error: "name required" });
 
   const { data, error } = await supabaseAdmin
@@ -3230,6 +3230,112 @@ app.delete("/api/v1/condos/:id/invoices/:invoiceId", authRequired, async (req, r
 });
 
 /* =========================
+   Invoice LINE Notification
+   ========================= */
+
+// POST /api/v1/condos/:id/invoices/:invoiceId/notify
+// — ส่งใบแจ้งหนี้ผ่าน LINE ให้ผู้เช่าของห้องนั้น
+app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.id;
+    const invoiceId = req.params.invoiceId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    // 1. ดึง invoice
+    const { data: invoice, error: invErr } = await supabaseAdmin
+      .schema("public")
+      .from("invoices")
+      .select("id, room_id, total_amount, due_date, status, note, created_at, rooms(room_no, floor)")
+      .eq("id", invoiceId)
+      .eq("condo_id", condoId)
+      .maybeSingle();
+
+    if (invErr) return res.status(500).json({ error: invErr.message });
+    if (!invoice) return res.status(404).json({ error: "invoice_not_found" });
+
+    const roomNo = invoice.rooms?.room_no || "—";
+
+    // 2. ดึงข้อมูลคอนโด
+    const { data: condo } = await supabaseAdmin
+      .schema("public")
+      .from("condos")
+      .select("name_th")
+      .eq("id", condoId)
+      .maybeSingle();
+
+    const condoName = condo?.name_th || "RentSphere";
+
+    // 3. หาผู้เช่าจาก dorm_users ที่ room ตรงกับ room_no + condo_id
+    const { data: tenants, error: tErr } = await supabaseAdmin
+      .schema("public")
+      .from("dorm_users")
+      .select("id, full_name, room, line_user_id, condo_id")
+      .eq("room", roomNo)
+      .eq("condo_id", condoId)
+      .not("line_user_id", "is", null);
+
+    if (tErr) return res.status(500).json({ error: tErr.message });
+
+    if (!tenants || tenants.length === 0) {
+      return res.status(404).json({ error: "no_tenant_with_line_found", roomNo });
+    }
+
+    // 4. สร้างข้อความ
+    const amount = Number(invoice.total_amount || 0).toLocaleString("th-TH", { minimumFractionDigits: 2 });
+    const dueDate = invoice.due_date
+      ? new Date(invoice.due_date).toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "long", year: "numeric" })
+      : "ไม่ระบุ";
+    const statusText = invoice.status === "PAID" ? "✅ ชำระแล้ว" : "⏳ รอชำระ";
+
+    const text =
+      `🏢 ${condoName}\n` +
+      `📋 ใบแจ้งหนี้ประจำเดือน\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      `🚪 ห้อง: ${roomNo}\n` +
+      `💰 ยอดชำระ: ฿${amount}\n` +
+      `📅 กำหนดชำระ: ${dueDate}\n` +
+      `📌 สถานะ: ${statusText}\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      (invoice.note ? `📝 หมายเหตุ: ${invoice.note}\n` : "") +
+      `\nกรุณาชำระเงินตามกำหนด ขอบคุณครับ 🙏`;
+
+    // 5. ส่ง LINE ให้ทุก tenant ที่อยู่ห้องนี้
+    const results = [];
+    for (const t of tenants) {
+      try {
+        await pushLineMessage(t.line_user_id, text);
+        results.push({ tenantName: t.full_name, lineUserId: t.line_user_id, status: "sent" });
+
+        // บันทึก log (ถ้ามีตาราง)
+        try {
+          await supabaseAdmin.from("invoice_notifications").insert([{
+            invoice_id: invoiceId,
+            condo_id: condoId,
+            room_id: invoice.room_id,
+            line_user_id: t.line_user_id,
+            tenant_name: t.full_name,
+            channel: "LINE",
+            status: "sent",
+            message: text,
+          }]);
+        } catch { /* ถ้าไม่มีตาราง ก็ข้ามไป */ }
+
+      } catch (e) {
+        console.error(`LINE push invoice error for ${t.line_user_id}:`, e);
+        results.push({ tenantName: t.full_name, lineUserId: t.line_user_id, status: "failed", error: e.message });
+      }
+    }
+
+    return res.json({ ok: true, sent: results.length, results });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+/* =========================
    Routes ready
    ========================= */
 console.log("Routes ready:", [
@@ -3267,6 +3373,7 @@ console.log("Routes ready:", [
   "POST /tenant/facility-bookings/:id/finish",
   "PUT /api/v1/condos/:condoId/rooms/access-code",
   "POST /api/v1/tenant/link-room",
+  "POST /api/v1/condos/:id/invoices/:invoiceId/notify",
 ]);
 
 const PORT = Number(process.env.PORT || 3001);
