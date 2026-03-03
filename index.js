@@ -1688,21 +1688,61 @@ async function pushLineByDormUserId(dormUserId, payload) {
 /* =========================
    Admin Tenants
    ========================= */
-app.get("/admin/tenants", requireAdmin, async (req, res) => {
+app.get("/admin/tenants", async (req, res) => {
   try {
     const { condoId } = req.query;
-    let q = supabaseAdmin.from("dorm_users")
-      .select("id, full_name, room, phone, email, line_user_id, registered_at")
-      .not("line_user_id", "is", null)
-      .order("registered_at", { ascending: false });
-    if (condoId) q = q.eq("condo_id", condoId);
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ error: pickErr(error) });
-    return res.json({ ok: true, items: data || [] });
+
+    let query = supabaseAdmin
+      .from("dorm_users")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (condoId) {
+      query = query.eq("condo_id", condoId);
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ items: data || [] });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "server error" });
+    return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
+
+// DELETE /admin/terminate-contract — ยุติสัญญา (ลบ dorm_user + เปลี่ยนห้องเป็น VACANT)
+app.delete("/admin/terminate-contract", requireAdmin, async (req, res) => {
+  try {
+    const { dormUserId, roomId, condoId } = req.body || {};
+    if (!dormUserId) return res.status(400).json({ error: "dormUserId required" });
+    if (!roomId) return res.status(400).json({ error: "roomId required" });
+
+    // 1) ลบ dorm_user (ผู้เช่า)
+    const { error: delErr } = await supabaseAdmin
+      .from("dorm_users")
+      .delete()
+      .eq("id", dormUserId);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    // 2) เปลี่ยนห้องเป็น VACANT + เคลียร์ access_code, tenant_name
+    const { error: updErr } = await supabaseAdmin
+      .from("rooms")
+      .update({
+        status: "VACANT",
+        access_code: null,
+        tenant_name: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", roomId);
+    if (updErr) return res.status(500).json({ error: updErr.message });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
 
 // PATCH /tenant/profile — อัพเดตชื่อ/โทร/เมลของ tenant
 app.patch("/tenant/profile", requireLineLogin, async (req, res) => {
@@ -1883,60 +1923,107 @@ app.patch("/parcels/:id/pickup", async (req, res) => {
 });
 
 // ===== admin: ประวัติการแจ้งพัสดุ =====
-app.get("/admin/parcel/history", requireAdmin, async (req, res) => {
+// ===== GET /admin/parcel/history — filter by condoId =====
+app.get("/admin/parcel/history", async (req, res) => {
   try {
     const { condoId } = req.query;
-    let q = supabaseAdmin.from("parcels")
-      .select("id, dorm_user_id, note, image_url, created_at, status, dorm_users(full_name, room, condo_id)")
-      .order("created_at", { ascending: false }).limit(200);
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ error: pickErr(error) });
-    let items = (data || []).map((p) => ({
-      id: p.id, dormUserId: p.dorm_user_id,
-      tenantName: p.dorm_users?.full_name || "-",
-      room: p.dorm_users?.room || null,
-      note: p.note || null, imageUrl: p.image_url || null,
-      createdAt: p.created_at, status: p.status || "sent",
-    }));
-    // filter by condoId client-side (via join)
+
+    let dormUserFilter = null;
     if (condoId) {
-      const duIds = new Set();
-      for (const p of data || []) {
-        if (p.dorm_users?.condo_id === condoId) duIds.add(p.dorm_user_id);
-      }
-      items = items.filter(i => duIds.has(i.dormUserId));
+      const { data: users } = await supabaseAdmin
+        .from("dorm_users")
+        .select("id, full_name, room")
+        .eq("condo_id", condoId);
+
+      if (!users || users.length === 0) return res.json({ items: [] });
+      dormUserFilter = users;
     }
-    return res.json({ ok: true, items });
+
+    let query = supabaseAdmin
+      .from("parcels")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (dormUserFilter) {
+      query = query.in("dorm_user_id", dormUserFilter.map(u => u.id));
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    let dormMap = {};
+    if (dormUserFilter) {
+      for (const u of dormUserFilter) dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
+    } else {
+      const ids = [...new Set((data || []).map(r => r.dorm_user_id).filter(Boolean))];
+      if (ids.length > 0) {
+        const { data: d } = await supabaseAdmin.from("dorm_users").select("id, full_name, room").in("id", ids);
+        for (const u of (d || [])) dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
+      }
+    }
+
+    const mapped = (data || []).map(row => ({
+      id: row.id,
+      dormUserId: row.dorm_user_id,
+      tenantName: dormMap[row.dorm_user_id]?.name || "",
+      room: dormMap[row.dorm_user_id]?.room || null,
+      note: row.note || null,
+      imageUrl: row.image_url || null,
+      createdAt: row.created_at,
+      status: row.status || "sent",
+    }));
+
+    return res.json({ items: mapped });
   } catch (e) {
-    return res.status(500).json({ error: pickErr(e) });
+    return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
+
+
+
 
 /* =========================
    Admin Repairs
    ========================= */
-app.get("/admin/repairs", requireAdmin, async (req, res) => {
+// ===== GET /admin/repairs  — filter by status + condoId =====
+app.get("/admin/repairs", async (req, res) => {
   try {
     const { status, condoId } = req.query;
-    // ถ้ามี condoId → หา dorm_user_ids ที่อยู่คอนโดนั้น
-    let dormUserIds = null;
-    if (condoId) {
-      const { data: dus } = await supabaseAdmin
-        .from("dorm_users").select("id").eq("condo_id", condoId);
-      dormUserIds = (dus || []).map(d => d.id);
-    }
-    let q = supabaseAdmin.from("repair_request")
-      .select("id, created_at, problem_type, description, status, location, room, image_url, line_user_id")
+    let query = supabaseAdmin
+      .from("repair_request")
+      .select("*")
       .order("created_at", { ascending: false });
-    if (status) q = q.eq("status", String(status));
-    if (dormUserIds) q = q.in("dorm_user_id", dormUserIds);
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ error: pickErr(error) });
-    return res.json({ ok: true, items: data || [] });
+    if (status) {
+      const statusMap = {
+        new: ["new", "ใหม่"],
+        in_progress: ["in_progress", "กำลังดำเนินงาน"],
+        done: ["done", "เสร็จแล้ว"],
+        rejected: ["rejected", "ปฏิเสธ"],
+      };
+      const vals = statusMap[status];
+      if (vals) query = query.in("status", vals);
+    }
+    if (condoId) {
+      // ดึง dorm_user_id ของคอนโดนี้
+      const { data: users } = await supabaseAdmin
+        .from("dorm_users")
+        .select("id")
+        .eq("condo_id", condoId);
+      if (!users || users.length === 0) return res.json({ items: [] });
+      query = query.in("dorm_user_id", users.map(u => u.id));
+    }
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ items: data || [] });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "server error" });
+    return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
+
+
+
 
 app.patch("/admin/repair/:id/status", requireAdmin, async (req, res) => {
   try {
@@ -2876,6 +2963,86 @@ app.get("/api/v1/condos/:id/billing-reports", authRequired, async (req, res) => 
   }
 });
 
+
+// ===== Room Contracts สัญญา =====
+
+// POST /api/v1/condos/:condoId/contracts — บันทึกสัญญาใหม่
+app.post("/api/v1/condos/:condoId/contracts", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const b = req.body || {};
+    const roomId = String(b.roomId || "").trim();
+    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+
+    const { data, error } = await supabaseAdmin
+      .from("room_contracts")
+      .insert([{
+        condo_id: condoId,
+        room_id: roomId,
+        tenant_first_name: b.tenantFirstName || null,
+        tenant_last_name: b.tenantLastName || null,
+        tenant_phone: b.tenantPhone || null,
+        tenant_citizen_id: b.tenantCitizenId || null,
+        tenant_address: b.tenantAddress || null,
+        check_in: b.checkIn || null,
+        check_out: b.checkOut || null,
+        monthly_rent: Number(b.monthlyRent || 0),
+        deposit: Number(b.deposit || 0),
+        deposit_pay_by: b.depositPayBy || null,
+        booking_fee: Number(b.bookingFee || 0),
+        booking_no: b.bookingNo || null,
+        emergency_name: b.emergencyName || null,
+        emergency_relation: b.emergencyRelation || null,
+        emergency_phone: b.emergencyPhone || null,
+        note: b.note || null,
+        status: "ACTIVE",
+      }])
+      .select("*")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.status(201).json({ ok: true, contract: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+// GET /api/v1/condos/:condoId/contracts?roomId=xxx — ดึงสัญญา ACTIVE ของห้อง
+app.get("/api/v1/condos/:condoId/contracts", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const roomId = req.query.roomId || null;
+    let q = supabaseAdmin
+      .from("room_contracts")
+      .select("*")
+      .eq("condo_id", condoId)
+      .eq("status", "ACTIVE")
+      .order("created_at", { ascending: false });
+
+    if (roomId) q = q.eq("room_id", roomId);
+
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      contract: (data && data[0]) || null,
+      contracts: data || [],
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+
 /* =========================
    Meters (มิเตอร์น้ำ/ไฟ)
    ========================= */
@@ -3374,6 +3541,7 @@ console.log("Routes ready:", [
   "PUT /api/v1/condos/:condoId/rooms/access-code",
   "POST /api/v1/tenant/link-room",
   "POST /api/v1/condos/:id/invoices/:invoiceId/notify",
+  "DELETE /admin/terminate-contract",
 ]);
 
 const PORT = Number(process.env.PORT || 3001);
