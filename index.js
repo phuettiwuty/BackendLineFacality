@@ -1691,26 +1691,16 @@ async function pushLineByDormUserId(dormUserId, payload) {
 app.get("/admin/tenants", async (req, res) => {
   try {
     const { condoId } = req.query;
+
     let query = supabaseAdmin
       .from("dorm_users")
       .select("*")
       .order("created_at", { ascending: false });
+
     if (condoId) {
-      const { data: rooms } = await supabaseAdmin
-        .from("rooms")
-        .select("room_no")
-        .eq("condo_id", condoId);
-      if (rooms && rooms.length > 0) {
-        const roomNos = rooms.map(r => r.room_no).filter(Boolean);
-        if (roomNos.length > 0) {
-          query = query.in("room", roomNos);
-        } else {
-          return res.json({ items: [] });
-        }
-      } else {
-        return res.json({ items: [] });
-      }
+      query = query.eq("condo_id", condoId);
     }
+
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ items: data || [] });
@@ -1718,6 +1708,8 @@ app.get("/admin/tenants", async (req, res) => {
     return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
+
 // DELETE /admin/terminate-contract — ยุติสัญญา (ลบ dorm_user + เปลี่ยนห้องเป็น VACANT)
 app.delete("/admin/terminate-contract", requireAdmin, async (req, res) => {
   try {
@@ -1938,22 +1930,13 @@ app.get("/admin/parcel/history", async (req, res) => {
 
     let dormUserFilter = null;
     if (condoId) {
-      const { data: rooms } = await supabaseAdmin
-        .from("rooms")
-        .select("room_no")
-        .eq("condo_id", condoId);
-
-      if (!rooms || rooms.length === 0) return res.json({ items: [] });
-      const roomNos = rooms.map(r => r.room_no).filter(Boolean);
-      if (roomNos.length === 0) return res.json({ items: [] });
-
-      const { data: dormUsers } = await supabaseAdmin
+      const { data: users } = await supabaseAdmin
         .from("dorm_users")
         .select("id, full_name, room")
-        .in("room", roomNos);
+        .eq("condo_id", condoId);
 
-      if (!dormUsers || dormUsers.length === 0) return res.json({ items: [] });
-      dormUserFilter = dormUsers;
+      if (!users || users.length === 0) return res.json({ items: [] });
+      dormUserFilter = users;
     }
 
     let query = supabaseAdmin
@@ -1968,15 +1951,14 @@ app.get("/admin/parcel/history", async (req, res) => {
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
 
-    // build dorm map
     let dormMap = {};
     if (dormUserFilter) {
       for (const u of dormUserFilter) dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
     } else {
       const ids = [...new Set((data || []).map(r => r.dorm_user_id).filter(Boolean))];
       if (ids.length > 0) {
-        const { data: allDorm } = await supabaseAdmin.from("dorm_users").select("id, full_name, room").in("id", ids);
-        for (const u of (allDorm || [])) dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
+        const { data: d } = await supabaseAdmin.from("dorm_users").select("id, full_name, room").in("id", ids);
+        for (const u of (d || [])) dormMap[u.id] = { name: u.full_name || "", room: u.room || "" };
       }
     }
 
@@ -2008,13 +1990,10 @@ app.get("/admin/parcel/history", async (req, res) => {
 app.get("/admin/repairs", async (req, res) => {
   try {
     const { status, condoId } = req.query;
-
     let query = supabaseAdmin
       .from("repair_request")
       .select("*")
       .order("created_at", { ascending: false });
-
-    // filter by status — รองรับทั้ง EN และ TH ที่เก็บใน DB
     if (status) {
       const statusMap = {
         new:         ["new", "ใหม่"],
@@ -2023,30 +2002,17 @@ app.get("/admin/repairs", async (req, res) => {
         rejected:    ["rejected", "ปฏิเสธ"],
       };
       const vals = statusMap[status];
-      if (vals) {
-        query = query.in("status", vals);
-      }
+      if (vals) query = query.in("status", vals);
     }
-
-    // filter by condoId
     if (condoId) {
-      const { data: rooms } = await supabaseAdmin
-        .from("rooms")
-        .select("room_no")
+      // ดึง dorm_user_id ของคอนโดนี้
+      const { data: users } = await supabaseAdmin
+        .from("dorm_users")
+        .select("id")
         .eq("condo_id", condoId);
-
-      if (rooms && rooms.length > 0) {
-        const roomNos = rooms.map(r => r.room_no).filter(Boolean);
-        if (roomNos.length > 0) {
-          query = query.in("room", roomNos);
-        } else {
-          return res.json({ items: [] });
-        }
-      } else {
-        return res.json({ items: [] });
-      }
+      if (!users || users.length === 0) return res.json({ items: [] });
+      query = query.in("dorm_user_id", users.map(u => u.id));
     }
-
     const { data, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ items: data || [] });
@@ -2054,6 +2020,8 @@ app.get("/admin/repairs", async (req, res) => {
     return res.status(500).json({ error: e?.message || "server_error" });
   }
 });
+
+ 
 
 
 
