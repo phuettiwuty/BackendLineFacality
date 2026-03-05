@@ -3593,6 +3593,243 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
 });
 
 /* =========================
+   SlipOK — ตรวจ slip ผ่าน LINE Webhook
+   ========================= */
+
+const SLIPOK_API_KEY = process.env.SLIPOK_API_KEY || "";
+const LINE_CHANNEL_TOKEN = process.env.LINE_MESSAGING_ACCESS_TOKEN || "";
+
+// ✅ ดาวน์โหลดรูปจาก LINE
+async function downloadLineImage(messageId) {
+  const res = await fetchFn(
+    `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+    { headers: { Authorization: `Bearer ${LINE_CHANNEL_TOKEN}` } }
+  );
+  if (!res.ok) throw new Error(`LINE download failed: ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+// ✅ ตรวจ slip ด้วย SlipOK API
+async function verifySlipWithSlipOK(imageBuffer) {
+  // SlipOK ใช้ multipart/form-data -> ส่ง file ผ่าน Blob
+  const formData = new FormData();
+  const blob = new Blob([imageBuffer], { type: "image/jpeg" });
+  formData.append("files", blob, "slip.jpg");
+  formData.append("log", "true");
+
+  const res = await fetchFn(
+    `https://api.slipok.com/api/line/apikey/${SLIPOK_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "x-authorization": SLIPOK_API_KEY },
+      body: formData,
+    }
+  );
+
+  const json = await res.json();
+  return json;
+}
+
+// ✅ ตอบกลับ LINE ด้วย replyToken
+async function replyLineMessage(replyToken, text) {
+  await fetchFn("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${LINE_CHANNEL_TOKEN}`,
+    },
+    body: JSON.stringify({
+      replyToken,
+      messages: [{ type: "text", text }],
+    }),
+  });
+}
+
+// ✅ หา invoice ค้างชำระจาก lineUserId
+async function findPendingInvoiceByLineUser(lineUserId) {
+  // 1. หา dorm_user จาก line_user_id
+  const { data: dormUser } = await supabaseAdmin
+    .from("dorm_users")
+    .select("id, room, condo_id, full_name")
+    .eq("line_user_id", String(lineUserId))
+    .maybeSingle();
+
+  if (!dormUser || !dormUser.room || !dormUser.condo_id) return null;
+
+  // 2. หา room_id จาก room_no + condo_id
+  const { data: room } = await supabaseAdmin
+    .from("rooms")
+    .select("id, room_no")
+    .eq("room_no", dormUser.room)
+    .eq("condo_id", dormUser.condo_id)
+    .maybeSingle();
+
+  if (!room) return null;
+
+  // 3. หา invoice ล่าสุดที่ยังไม่จ่าย
+  const { data: invoice } = await supabaseAdmin
+    .from("invoices")
+    .select("id, total_amount, status, condo_id, room_id, created_at")
+    .eq("room_id", room.id)
+    .eq("condo_id", dormUser.condo_id)
+    .in("status", ["UNPAID", "OVERDUE"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!invoice) return null;
+
+  return {
+    invoiceId: invoice.id,
+    condoId: invoice.condo_id,
+    roomId: invoice.room_id,
+    roomNo: room.room_no,
+    totalAmount: Number(invoice.total_amount || 0),
+    tenantName: dormUser.full_name || "ผู้เช่า",
+  };
+}
+
+// ✅ LINE Webhook — รับ slip จากผู้เช่าผ่าน LINE
+app.post("/webhook/line", async (req, res) => {
+  // ตอบ LINE ทันที (ถ้าไม่ตอบภายใน 1 วิ LINE จะ retry)
+  res.status(200).json({ ok: true });
+
+  const events = req.body?.events || [];
+
+  for (const event of events) {
+    // ข้าม event ที่ไม่ใช่ message
+    if (event.type !== "message") continue;
+
+    const replyToken = event.replyToken;
+    const lineUserId = event.source?.userId;
+
+    // ถ้าไม่ใช่รูป → บอกให้ส่งรูป
+    if (event.message?.type !== "image") {
+      try {
+        await replyLineMessage(replyToken, "📸 กรุณาส่งรูป slip โอนเงินเพื่อตรวจสอบค่ะ");
+      } catch (e) {
+        console.error("[SLIP] reply non-image error:", e.message);
+      }
+      continue;
+    }
+
+    try {
+      console.log("[SLIP] Processing slip from:", lineUserId);
+
+      // 1. ดาวน์โหลดรูป slip จาก LINE
+      const imageBuffer = await downloadLineImage(event.message.id);
+      console.log("[SLIP] Downloaded image:", imageBuffer.length, "bytes");
+
+      // 2. ส่งให้ SlipOK ตรวจ
+      const slipResult = await verifySlipWithSlipOK(imageBuffer);
+      console.log("[SLIP] SlipOK result:", JSON.stringify(slipResult).slice(0, 300));
+
+      // 3. ตรวจผล
+      if (!slipResult?.success) {
+        const errMsg = slipResult?.message || "ตรวจ slip ไม่สำเร็จ";
+        await replyLineMessage(replyToken,
+          `❌ ตรวจ slip ไม่สำเร็จ\n📝 ${errMsg}\n\nกรุณาส่งรูป slip ที่ชัดเจนอีกครั้ง`
+        );
+        continue;
+      }
+
+      // ✅ slip ถูกต้อง — ดึงข้อมูลจาก SlipOK
+      const slipData = slipResult.data || {};
+      const slipAmount = Number(slipData.amount?.amount || slipData.amount || 0);
+      const slipRef = slipData.transRef || slipData.transactionId || "";
+      const slipBank = slipData.sendingBank || slipData.sender?.bank?.name || "";
+      const slipDate = slipData.transDate || slipData.date || "";
+
+      // 4. หา invoice ค้างชำระ
+      const pendingInvoice = lineUserId ? await findPendingInvoiceByLineUser(lineUserId) : null;
+
+      if (pendingInvoice) {
+        // 5. อัปเดต invoice เป็น PAID
+        const { error: payErr } = await supabaseAdmin
+          .from("invoices")
+          .update({
+            status: "PAID",
+            paid_at: new Date().toISOString(),
+            note: `ตรวจ slip อัตโนมัติ | Ref: ${slipRef} | ยอด: ${slipAmount} | ธนาคาร: ${slipBank}`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", pendingInvoice.invoiceId);
+
+        if (payErr) {
+          console.error("[SLIP] Update invoice error:", payErr.message);
+        }
+
+        // บันทึก log (ถ้ามีตาราง slip_verifications)
+        try {
+          await supabaseAdmin.from("slip_verifications").insert([{
+            invoice_id: pendingInvoice.invoiceId,
+            condo_id: pendingInvoice.condoId,
+            room_id: pendingInvoice.roomId,
+            line_user_id: lineUserId,
+            slip_ref: slipRef,
+            slip_amount: slipAmount,
+            slip_bank: slipBank,
+            slip_date: slipDate,
+            slip_raw: slipData,
+            verified_at: new Date().toISOString(),
+          }]);
+        } catch { /* ถ้าไม่มีตาราง ก็ข้ามไป */ }
+
+        await replyLineMessage(replyToken,
+          `✅ ตรวจ slip สำเร็จ!\n` +
+          `━━━━━━━━━━━━━━━\n` +
+          `💰 ยอด: ${slipAmount.toLocaleString()} บาท\n` +
+          `🏦 ธนาคาร: ${slipBank}\n` +
+          `📝 Ref: ${slipRef}\n` +
+          `━━━━━━━━━━━━━━━\n` +
+          `🚪 ห้อง ${pendingInvoice.roomNo} บันทึกชำระแล้ว ✅\n` +
+          `ขอบคุณที่ชำระค่าเช่าครับ/ค่ะ 🙏`
+        );
+      } else {
+        // ไม่เจอ invoice ค้าง → แจ้งว่า slip ถูกแต่ไม่มีบิล
+        await replyLineMessage(replyToken,
+          `✅ slip ถูกต้อง!\n` +
+          `💰 ยอด: ${slipAmount.toLocaleString()} บาท\n` +
+          `🏦 ธนาคาร: ${slipBank}\n` +
+          `📝 Ref: ${slipRef}\n\n` +
+          `⚠️ ไม่พบใบแจ้งหนี้ค้างชำระ\nกรุณาติดต่อเจ้าของหอพักเพื่อยืนยัน`
+        );
+      }
+    } catch (err) {
+      console.error("[SLIP] Verify error:", err.message);
+      try {
+        await replyLineMessage(replyToken,
+          `❌ เกิดข้อผิดพลาดในการตรวจ slip\nกรุณาลองใหม่อีกครั้ง`
+        );
+      } catch { }
+    }
+  }
+});
+
+// ✅ API สำหรับ frontend ดูประวัติตรวจ slip
+app.get("/api/v1/condos/:condoId/slip-verifications", authRequired, async (req, res) => {
+  try {
+    const ownerId = req.ownerId;
+    const condoId = req.params.condoId;
+
+    const own = await assertOwnsCondo(ownerId, condoId);
+    if (!own.ok) return res.status(own.status).json({ error: own.error });
+
+    const { data, error } = await supabaseAdmin
+      .from("slip_verifications")
+      .select("*")
+      .eq("condo_id", condoId)
+      .order("verified_at", { ascending: false })
+      .limit(50);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, items: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+/* =========================
    Routes ready
    ========================= */
 console.log("Routes ready:", [
@@ -3632,6 +3869,9 @@ console.log("Routes ready:", [
   "POST /api/v1/tenant/link-room",
   "POST /api/v1/condos/:id/invoices/:invoiceId/notify",
   "DELETE /admin/terminate-contract",
+
+  "POST /webhook/line (SlipOK verify)",
+  "GET /api/v1/condos/:condoId/slip-verifications",
 ]);
 
 const PORT = Number(process.env.PORT || 3001);
