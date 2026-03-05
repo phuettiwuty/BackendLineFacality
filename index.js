@@ -3525,6 +3525,14 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
 
     const condoName = condo?.name_th || "RentSphere";
 
+    // 2.5 ดึงบัญชีธนาคาร
+    const { data: bankAccounts } = await supabaseAdmin
+      .schema("public")
+      .from("condo_bank_accounts")
+      .select("bank, account_name, account_no")
+      .eq("condo_id", condoId)
+      .order("created_at", { ascending: true });
+
     // 3. หาผู้เช่าจาก dorm_users ที่ room ตรงกับ room_no + condo_id
     const { data: tenants, error: tErr } = await supabaseAdmin
       .schema("public")
@@ -3547,6 +3555,16 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
       : "ไม่ระบุ";
     const statusText = invoice.status === "PAID" ? "✅ ชำระแล้ว" : "⏳ รอชำระ";
 
+    // สร้างข้อมูลบัญชีธนาคาร
+    let bankSection = "";
+    if (bankAccounts && bankAccounts.length > 0) {
+      bankSection = `\n💳 ช่องทางชำระเงิน:\n`;
+      for (const acc of bankAccounts) {
+        bankSection += `🏦 ${acc.bank}\n   ชื่อ: ${acc.account_name}\n   เลขบัญชี: ${acc.account_no}\n`;
+      }
+      bankSection += `━━━━━━━━━━━━━━━\n`;
+    }
+
     const text =
       `🏢 ${condoName}\n` +
       `📋 ใบแจ้งหนี้ประจำเดือน\n` +
@@ -3557,7 +3575,9 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
       `📌 สถานะ: ${statusText}\n` +
       `━━━━━━━━━━━━━━━\n` +
       (invoice.note ? `📝 หมายเหตุ: ${invoice.note}\n` : "") +
-      `\nกรุณาชำระเงินตามกำหนด ขอบคุณครับ 🙏`;
+      bankSection +
+      `\n📸 โอนแล้วส่งรูป slip มาที่นี่\nระบบจะตรวจอัตโนมัติค่ะ ✅\n` +
+      `\nขอบคุณครับ/ค่ะ 🙏`;
 
     // 5. ส่ง LINE ให้ทุก tenant ที่อยู่ห้องนี้
     const results = [];
@@ -3745,47 +3765,83 @@ app.post("/webhook/line", async (req, res) => {
       const pendingInvoice = lineUserId ? await findPendingInvoiceByLineUser(lineUserId) : null;
 
       if (pendingInvoice) {
-        // 5. อัปเดต invoice เป็น PAID
-        const { error: payErr } = await supabaseAdmin
-          .from("invoices")
-          .update({
-            status: "PAID",
-            paid_at: new Date().toISOString(),
-            note: `ตรวจ slip อัตโนมัติ | Ref: ${slipRef} | ยอด: ${slipAmount} | ธนาคาร: ${slipBank}`,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", pendingInvoice.invoiceId);
+        const invoiceAmount = pendingInvoice.totalAmount;
+        const amountMatch = slipAmount >= invoiceAmount;
+        const amountDiff = Math.abs(slipAmount - invoiceAmount);
 
-        if (payErr) {
-          console.error("[SLIP] Update invoice error:", payErr.message);
+        if (amountMatch) {
+          // ✅ ยอดตรง/มากกว่า → อัปเดต PAID
+          const { error: payErr } = await supabaseAdmin
+            .from("invoices")
+            .update({
+              status: "PAID",
+              paid_at: new Date().toISOString(),
+              note: `ตรวจ slip อัตโนมัติ | Ref: ${slipRef} | ยอด: ${slipAmount} | ธนาคาร: ${slipBank}`,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", pendingInvoice.invoiceId);
+
+          if (payErr) {
+            console.error("[SLIP] Update invoice error:", payErr.message);
+          }
+
+          // บันทึก log
+          try {
+            await supabaseAdmin.from("slip_verifications").insert([{
+              invoice_id: pendingInvoice.invoiceId,
+              condo_id: pendingInvoice.condoId,
+              room_id: pendingInvoice.roomId,
+              line_user_id: lineUserId,
+              slip_ref: slipRef,
+              slip_amount: slipAmount,
+              slip_bank: slipBank,
+              slip_date: slipDate,
+              slip_raw: slipData,
+              verified_at: new Date().toISOString(),
+            }]);
+          } catch { /* ถ้าไม่มีตาราง ก็ข้ามไป */ }
+
+          await replyLineMessage(replyToken,
+            `✅ ตรวจ slip สำเร็จ!\n` +
+            `━━━━━━━━━━━━━━━\n` +
+            `💰 ยอดโอน: ${slipAmount.toLocaleString()} บาท\n` +
+            `📋 ยอดบิล: ${invoiceAmount.toLocaleString()} บาท\n` +
+            `🏦 ธนาคาร: ${slipBank}\n` +
+            `📝 Ref: ${slipRef}\n` +
+            `━━━━━━━━━━━━━━━\n` +
+            `🚪 ห้อง ${pendingInvoice.roomNo} บันทึกชำระแล้ว ✅\n` +
+            `ขอบคุณที่ชำระค่าเช่าครับ/ค่ะ 🙏`
+          );
+        } else {
+          // ⚠️ ยอดไม่ตรง → แจ้งเตือนแต่ไม่ mark PAID
+          // บันทึก log เป็น pending
+          try {
+            await supabaseAdmin.from("slip_verifications").insert([{
+              invoice_id: pendingInvoice.invoiceId,
+              condo_id: pendingInvoice.condoId,
+              room_id: pendingInvoice.roomId,
+              line_user_id: lineUserId,
+              slip_ref: slipRef,
+              slip_amount: slipAmount,
+              slip_bank: slipBank,
+              slip_date: slipDate,
+              slip_raw: slipData,
+              verified_at: new Date().toISOString(),
+            }]);
+          } catch { }
+
+          await replyLineMessage(replyToken,
+            `⚠️ ยอดโอนไม่ตรงกับบิล\n` +
+            `━━━━━━━━━━━━━━━\n` +
+            `💰 ยอดโอน: ${slipAmount.toLocaleString()} บาท\n` +
+            `📋 ยอดบิล: ${invoiceAmount.toLocaleString()} บาท\n` +
+            `📊 ขาดอีก: ${amountDiff.toLocaleString()} บาท\n` +
+            `🏦 ธนาคาร: ${slipBank}\n` +
+            `📝 Ref: ${slipRef}\n` +
+            `━━━━━━━━━━━━━━━\n` +
+            `กรุณาโอนเพิ่มหรือติดต่อเจ้าของหอพัก`
+          );
         }
-
-        // บันทึก log (ถ้ามีตาราง slip_verifications)
-        try {
-          await supabaseAdmin.from("slip_verifications").insert([{
-            invoice_id: pendingInvoice.invoiceId,
-            condo_id: pendingInvoice.condoId,
-            room_id: pendingInvoice.roomId,
-            line_user_id: lineUserId,
-            slip_ref: slipRef,
-            slip_amount: slipAmount,
-            slip_bank: slipBank,
-            slip_date: slipDate,
-            slip_raw: slipData,
-            verified_at: new Date().toISOString(),
-          }]);
-        } catch { /* ถ้าไม่มีตาราง ก็ข้ามไป */ }
-
-        await replyLineMessage(replyToken,
-          `✅ ตรวจ slip สำเร็จ!\n` +
-          `━━━━━━━━━━━━━━━\n` +
-          `💰 ยอด: ${slipAmount.toLocaleString()} บาท\n` +
-          `🏦 ธนาคาร: ${slipBank}\n` +
-          `📝 Ref: ${slipRef}\n` +
-          `━━━━━━━━━━━━━━━\n` +
-          `🚪 ห้อง ${pendingInvoice.roomNo} บันทึกชำระแล้ว ✅\n` +
-          `ขอบคุณที่ชำระค่าเช่าครับ/ค่ะ 🙏`
-        );
       } else {
         // ไม่เจอ invoice ค้าง → แจ้งว่า slip ถูกแต่ไม่มีบิล
         await replyLineMessage(replyToken,
