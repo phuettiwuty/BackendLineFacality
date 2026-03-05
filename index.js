@@ -3596,6 +3596,7 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
    SlipOK — ตรวจ slip ผ่าน LINE Webhook
    ========================= */
 
+const SLIPOK_BRANCH_ID = process.env.SLIPOK_BRANCH_ID || "";
 const SLIPOK_API_KEY = process.env.SLIPOK_API_KEY || "";
 const LINE_CHANNEL_TOKEN = process.env.LINE_MESSAGING_ACCESS_TOKEN || "";
 
@@ -3618,7 +3619,7 @@ async function verifySlipWithSlipOK(imageBuffer) {
   formData.append("log", "true");
 
   const res = await fetchFn(
-    `https://api.slipok.com/api/line/apikey/${SLIPOK_API_KEY}`,
+    `https://api.slipok.com/api/line/apikey/${SLIPOK_BRANCH_ID}`,
     {
       method: "POST",
       headers: { "x-authorization": SLIPOK_API_KEY },
