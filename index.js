@@ -3736,13 +3736,39 @@ app.post("/webhook/line", async (req, res) => {
     const replyToken = event.replyToken;
     const lineUserId = event.source?.userId;
 
-    // ถ้าไม่ใช่รูป → บอกให้ส่งรูป
-    if (event.message?.type !== "image") {
-      try {
-        await replyLineMessage(replyToken, "📸 กรุณาส่งรูป slip โอนเงินเพื่อตรวจสอบค่ะ");
-      } catch (e) {
-        console.error("[SLIP] reply non-image error:", e.message);
+    // ถ้าเป็นข้อความ → เช็คว่าถามเรื่อง slip/ชำระ ไหม
+    if (event.message?.type === "text") {
+      const txt = (event.message.text || "").toLowerCase();
+      const slipKeywords = ["slip", "สลิป", "ชำระ", "โอน", "จ่าย", "บิล", "แจ้งโอน"];
+      const isSlipRelated = slipKeywords.some(kw => txt.includes(kw));
+
+      if (isSlipRelated) {
+        // เช็คว่ามีบิลค้างไหม
+        const pending = lineUserId ? await findPendingInvoiceByLineUser(lineUserId) : null;
+        if (pending) {
+          try {
+            await replyLineMessage(replyToken,
+              `📋 ห้อง ${pending.roomNo} มียอดค้างชำระ ฿${pending.totalAmount.toLocaleString()}\n\n📸 ส่งรูป slip โอนเงินมาได้เลยค่ะ\nระบบจะตรวจอัตโนมัติ ✅`
+            );
+          } catch (e) { console.error("[SLIP] reply text error:", e.message); }
+        } else {
+          try {
+            await replyLineMessage(replyToken, "✅ ไม่มียอดค้างชำระค่ะ");
+          } catch (e) { console.error("[SLIP] reply text error:", e.message); }
+        }
       }
+      // ถ้าไม่เกี่ยวกับ slip → ไม่ตอบ (ปล่อยให้ LINE OA ตอบปกติ)
+      continue;
+    }
+
+    // ถ้าไม่ใช่รูป → ข้ามไปเลย (ไม่ตอบ)
+    if (event.message?.type !== "image") continue;
+
+    // ✅ เป็นรูป → เช็คก่อนว่ามีบิลค้างไหม ถ้าไม่มี → ไม่ต้องตรวจ slip
+    const pendingInvoice = lineUserId ? await findPendingInvoiceByLineUser(lineUserId) : null;
+    if (!pendingInvoice) {
+      // ไม่มีบิลค้าง → ไม่ตรวจ slip (ข้ามไป ไม่ตอบ)
+      console.log("[SLIP] No pending invoice for", lineUserId, "— skipping");
       continue;
     }
 
@@ -3772,96 +3798,81 @@ app.post("/webhook/line", async (req, res) => {
       const slipRef = slipData.transRef || slipData.transactionId || "";
       const slipBank = slipData.sendingBank || slipData.sender?.bank?.name || "";
       const slipDate = slipData.transDate || slipData.date || "";
+      // 4. เช็คยอด slip vs invoice (pendingInvoice มาจาก pre-check ด้านบน)
+      const invoiceAmount = pendingInvoice.totalAmount;
+      const amountMatch = slipAmount >= invoiceAmount;
+      const amountDiff = Math.abs(slipAmount - invoiceAmount);
 
-      // 4. หา invoice ค้างชำระ
-      const pendingInvoice = lineUserId ? await findPendingInvoiceByLineUser(lineUserId) : null;
+      if (amountMatch) {
+        // ✅ ยอดตรง/มากกว่า → อัปเดต PAID
+        const { error: payErr } = await supabaseAdmin
+          .from("invoices")
+          .update({
+            status: "PAID",
+            paid_at: new Date().toISOString(),
+            note: `ตรวจ slip อัตโนมัติ | Ref: ${slipRef} | ยอด: ${slipAmount} | ธนาคาร: ${slipBank}`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", pendingInvoice.invoiceId);
 
-      if (pendingInvoice) {
-        const invoiceAmount = pendingInvoice.totalAmount;
-        const amountMatch = slipAmount >= invoiceAmount;
-        const amountDiff = Math.abs(slipAmount - invoiceAmount);
-
-        if (amountMatch) {
-          // ✅ ยอดตรง/มากกว่า → อัปเดต PAID
-          const { error: payErr } = await supabaseAdmin
-            .from("invoices")
-            .update({
-              status: "PAID",
-              paid_at: new Date().toISOString(),
-              note: `ตรวจ slip อัตโนมัติ | Ref: ${slipRef} | ยอด: ${slipAmount} | ธนาคาร: ${slipBank}`,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", pendingInvoice.invoiceId);
-
-          if (payErr) {
-            console.error("[SLIP] Update invoice error:", payErr.message);
-          }
-
-          // บันทึก log
-          try {
-            await supabaseAdmin.from("slip_verifications").insert([{
-              invoice_id: pendingInvoice.invoiceId,
-              condo_id: pendingInvoice.condoId,
-              room_id: pendingInvoice.roomId,
-              line_user_id: lineUserId,
-              slip_ref: slipRef,
-              slip_amount: slipAmount,
-              slip_bank: slipBank,
-              slip_date: slipDate,
-              slip_raw: slipData,
-              verified_at: new Date().toISOString(),
-            }]);
-          } catch { /* ถ้าไม่มีตาราง ก็ข้ามไป */ }
-
-          await replyLineMessage(replyToken,
-            `✅ ตรวจ slip สำเร็จ!\n` +
-            `━━━━━━━━━━━━━━━\n` +
-            `💰 ยอดโอน: ${slipAmount.toLocaleString()} บาท\n` +
-            `📋 ยอดบิล: ${invoiceAmount.toLocaleString()} บาท\n` +
-            `🏦 ธนาคาร: ${slipBank}\n` +
-            `📝 Ref: ${slipRef}\n` +
-            `━━━━━━━━━━━━━━━\n` +
-            `🚪 ห้อง ${pendingInvoice.roomNo} บันทึกชำระแล้ว ✅\n` +
-            `ขอบคุณที่ชำระค่าเช่าครับ/ค่ะ 🙏`
-          );
-        } else {
-          // ⚠️ ยอดไม่ตรง → แจ้งเตือนแต่ไม่ mark PAID
-          // บันทึก log เป็น pending
-          try {
-            await supabaseAdmin.from("slip_verifications").insert([{
-              invoice_id: pendingInvoice.invoiceId,
-              condo_id: pendingInvoice.condoId,
-              room_id: pendingInvoice.roomId,
-              line_user_id: lineUserId,
-              slip_ref: slipRef,
-              slip_amount: slipAmount,
-              slip_bank: slipBank,
-              slip_date: slipDate,
-              slip_raw: slipData,
-              verified_at: new Date().toISOString(),
-            }]);
-          } catch { }
-
-          await replyLineMessage(replyToken,
-            `⚠️ ยอดโอนไม่ตรงกับบิล\n` +
-            `━━━━━━━━━━━━━━━\n` +
-            `💰 ยอดโอน: ${slipAmount.toLocaleString()} บาท\n` +
-            `📋 ยอดบิล: ${invoiceAmount.toLocaleString()} บาท\n` +
-            `📊 ขาดอีก: ${amountDiff.toLocaleString()} บาท\n` +
-            `🏦 ธนาคาร: ${slipBank}\n` +
-            `📝 Ref: ${slipRef}\n` +
-            `━━━━━━━━━━━━━━━\n` +
-            `กรุณาโอนเพิ่มหรือติดต่อเจ้าของหอพัก`
-          );
+        if (payErr) {
+          console.error("[SLIP] Update invoice error:", payErr.message);
         }
-      } else {
-        // ไม่เจอ invoice ค้าง → แจ้งว่า slip ถูกแต่ไม่มีบิล
+
+        // บันทึก log
+        try {
+          await supabaseAdmin.from("slip_verifications").insert([{
+            invoice_id: pendingInvoice.invoiceId,
+            condo_id: pendingInvoice.condoId,
+            room_id: pendingInvoice.roomId,
+            line_user_id: lineUserId,
+            slip_ref: slipRef,
+            slip_amount: slipAmount,
+            slip_bank: slipBank,
+            slip_date: slipDate,
+            slip_raw: slipData,
+            verified_at: new Date().toISOString(),
+          }]);
+        } catch { /* ถ้าไม่มีตาราง ก็ข้ามไป */ }
+
         await replyLineMessage(replyToken,
-          `✅ slip ถูกต้อง!\n` +
-          `💰 ยอด: ${slipAmount.toLocaleString()} บาท\n` +
+          `✅ ตรวจ slip สำเร็จ!\n` +
+          `━━━━━━━━━━━━━━━\n` +
+          `💰 ยอดโอน: ${slipAmount.toLocaleString()} บาท\n` +
+          `📋 ยอดบิล: ${invoiceAmount.toLocaleString()} บาท\n` +
           `🏦 ธนาคาร: ${slipBank}\n` +
-          `📝 Ref: ${slipRef}\n\n` +
-          `⚠️ ไม่พบใบแจ้งหนี้ค้างชำระ\nกรุณาติดต่อเจ้าของหอพักเพื่อยืนยัน`
+          `📝 Ref: ${slipRef}\n` +
+          `━━━━━━━━━━━━━━━\n` +
+          `🚪 ห้อง ${pendingInvoice.roomNo} บันทึกชำระแล้ว ✅\n` +
+          `ขอบคุณที่ชำระค่าเช่าครับ/ค่ะ 🙏`
+        );
+      } else {
+        // ⚠️ ยอดไม่ตรง → แจ้งเตือนแต่ไม่ mark PAID
+        try {
+          await supabaseAdmin.from("slip_verifications").insert([{
+            invoice_id: pendingInvoice.invoiceId,
+            condo_id: pendingInvoice.condoId,
+            room_id: pendingInvoice.roomId,
+            line_user_id: lineUserId,
+            slip_ref: slipRef,
+            slip_amount: slipAmount,
+            slip_bank: slipBank,
+            slip_date: slipDate,
+            slip_raw: slipData,
+            verified_at: new Date().toISOString(),
+          }]);
+        } catch { }
+
+        await replyLineMessage(replyToken,
+          `⚠️ ยอดโอนไม่ตรงกับบิล\n` +
+          `━━━━━━━━━━━━━━━\n` +
+          `💰 ยอดโอน: ${slipAmount.toLocaleString()} บาท\n` +
+          `📋 ยอดบิล: ${invoiceAmount.toLocaleString()} บาท\n` +
+          `📊 ขาดอีก: ${amountDiff.toLocaleString()} บาท\n` +
+          `🏦 ธนาคาร: ${slipBank}\n` +
+          `📝 Ref: ${slipRef}\n` +
+          `━━━━━━━━━━━━━━━\n` +
+          `กรุณาโอนเพิ่มหรือติดต่อเจ้าของหอพัก`
         );
       }
     } catch (err) {
