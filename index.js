@@ -3616,15 +3616,15 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
    SlipOK — ตรวจ slip ผ่าน LINE Webhook
    ========================= */
 
-const SLIPOK_BRANCH_ID = process.env.SLIPOK_BRANCH_ID || "";
-const SLIPOK_API_KEY = process.env.SLIPOK_API_KEY || "";
-const LINE_CHANNEL_TOKEN = process.env.LINE_MESSAGING_ACCESS_TOKEN || "";
+console.log("HAS_SLIPOK_BRANCH_ID:", !!process.env.SLIPOK_BRANCH_ID);
+console.log("HAS_SLIPOK_API_KEY:", !!process.env.SLIPOK_API_KEY);
 
 // ✅ ดาวน์โหลดรูปจาก LINE
 async function downloadLineImage(messageId) {
+  const token = process.env.LINE_MESSAGING_ACCESS_TOKEN || "";
   const res = await fetchFn(
     `https://api-data.line.me/v2/bot/message/${messageId}/content`,
-    { headers: { Authorization: `Bearer ${LINE_CHANNEL_TOKEN}` } }
+    { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!res.ok) throw new Error(`LINE download failed: ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
@@ -3632,32 +3632,44 @@ async function downloadLineImage(messageId) {
 
 // ✅ ตรวจ slip ด้วย SlipOK API
 async function verifySlipWithSlipOK(imageBuffer) {
-  // SlipOK ใช้ multipart/form-data -> ส่ง file ผ่าน Blob
+  const branchId = process.env.SLIPOK_BRANCH_ID || "";
+  const apiKey = process.env.SLIPOK_API_KEY || "";
+
+  // รองรับทั้ง URL เต็มและ Branch ID อย่างเดียว
+  let slipUrl;
+  if (branchId.startsWith("http")) {
+    slipUrl = branchId; // ใส่ URL เต็มมา
+  } else {
+    slipUrl = `https://api.slipok.com/api/line/apikey/${branchId}`;
+  }
+
+  console.log("[SLIP] URL:", slipUrl);
+  console.log("[SLIP] API Key length:", apiKey.length);
+
   const formData = new FormData();
   const blob = new Blob([imageBuffer], { type: "image/jpeg" });
   formData.append("files", blob, "slip.jpg");
   formData.append("log", "true");
 
-  const res = await fetchFn(
-    `https://api.slipok.com/api/line/apikey/${SLIPOK_BRANCH_ID}`,
-    {
-      method: "POST",
-      headers: { "x-authorization": SLIPOK_API_KEY },
-      body: formData,
-    }
-  );
+  const res = await fetchFn(slipUrl, {
+    method: "POST",
+    headers: { "x-authorization": apiKey },
+    body: formData,
+  });
 
   const json = await res.json();
+  console.log("[SLIP] Response status:", res.status, "body:", JSON.stringify(json).slice(0, 200));
   return json;
 }
 
 // ✅ ตอบกลับ LINE ด้วย replyToken
 async function replyLineMessage(replyToken, text) {
+  const token = process.env.LINE_MESSAGING_ACCESS_TOKEN || "";
   await fetchFn("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${LINE_CHANNEL_TOKEN}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
       replyToken,
