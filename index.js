@@ -3619,6 +3619,38 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
 console.log("HAS_SLIPOK_BRANCH_ID:", !!process.env.SLIPOK_BRANCH_ID);
 console.log("HAS_SLIPOK_API_KEY:", !!process.env.SLIPOK_API_KEY);
 
+// ✅ แปลงรหัสธนาคาร → ชื่อไทย
+const THAI_BANK_NAMES = {
+  "002": "กรุงเทพ (BBL)",
+  "004": "กสิกรไทย (KBANK)",
+  "006": "กรุงไทย (KTB)",
+  "011": "ทหารไทยธนชาต (TTB)",
+  "014": "ไทยพาณิชย์ (SCB)",
+  "017": "ซิตี้แบงก์",
+  "020": "สแตนดาร์ดชาร์เตอร์ด",
+  "022": "CIMB Thai",
+  "024": "UOB",
+  "025": "กรุงศรีอยุธยา (BAY)",
+  "030": "ออมสิน (GSB)",
+  "033": "ธอส. (GHB)",
+  "034": "ธ.ก.ส. (BAAC)",
+  "039": "มิซูโฮ",
+  "045": "ธนาคารแลนด์ แอนด์ เฮ้าส์",
+  "065": "ธนชาต",
+  "066": "อิสลามแห่งประเทศไทย",
+  "067": "ทิสโก้",
+  "069": "เกียรตินาคินภัทร (KKP)",
+  "070": "ไอซีบีซี (ไทย)",
+  "071": "ไทยเครดิต",
+  "073": "แลนด์ แอนด์ เฮ้าส์",
+};
+
+function resolveBankName(code) {
+  if (!code) return "ไม่ระบุ";
+  const str = String(code).trim();
+  return THAI_BANK_NAMES[str] || str;
+}
+
 // ✅ ดาวน์โหลดรูปจาก LINE
 async function downloadLineImage(messageId) {
   const token = process.env.LINE_MESSAGING_ACCESS_TOKEN || "";
@@ -3796,7 +3828,8 @@ app.post("/webhook/line", async (req, res) => {
       const slipData = slipResult.data || {};
       const slipAmount = Number(slipData.amount?.amount || slipData.amount || 0);
       const slipRef = slipData.transRef || slipData.transactionId || "";
-      const slipBank = slipData.sendingBank || slipData.sender?.bank?.name || "";
+      const slipBankRaw = slipData.sendingBank || slipData.sender?.bank?.name || "";
+      const slipBank = resolveBankName(slipBankRaw);
       const slipDate = slipData.transDate || slipData.date || "";
       // 4. เช็คยอด slip vs invoice (pendingInvoice มาจาก pre-check ด้านบน)
       const invoiceAmount = pendingInvoice.totalAmount;
