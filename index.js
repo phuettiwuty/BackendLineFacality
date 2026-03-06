@@ -3613,6 +3613,72 @@ app.post("/api/v1/condos/:id/invoices/:invoiceId/notify", authRequired, async (r
 });
 
 /* =========================
+   Tenant Invoices — ดึงประวัติบิลของผู้เช่า
+   ========================= */
+app.get("/tenant/invoices", requireLineLogin, async (req, res) => {
+  try {
+    const lineUserId = req.user.line_user_id;
+    const roomNo = req.user.room;
+
+    // 1. หา dorm_user เพื่อดึง condo_id
+    const { data: dormUser } = await supabaseAdmin
+      .from("dorm_users")
+      .select("id, room, condo_id, full_name")
+      .eq("line_user_id", lineUserId)
+      .maybeSingle();
+
+    if (!dormUser || !dormUser.condo_id) {
+      return res.json({ ok: true, invoices: [] });
+    }
+
+    // 2. หา room_id
+    const { data: room } = await supabaseAdmin
+      .from("rooms")
+      .select("id, room_no")
+      .eq("room_no", dormUser.room)
+      .eq("condo_id", dormUser.condo_id)
+      .maybeSingle();
+
+    if (!room) return res.json({ ok: true, invoices: [] });
+
+    // 3. ดึง invoices ทั้งหมดของห้องนี้
+    const { data: invoices, error } = await supabaseAdmin
+      .from("invoices")
+      .select("id, total_amount, status, note, due_date, paid_at, created_at, condo_id")
+      .eq("room_id", room.id)
+      .eq("condo_id", dormUser.condo_id)
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // 4. ดึงชื่อหอ
+    const { data: condo } = await supabaseAdmin
+      .from("condos")
+      .select("name_th")
+      .eq("id", dormUser.condo_id)
+      .maybeSingle();
+
+    return res.json({
+      ok: true,
+      roomNo: room.room_no,
+      condoName: condo?.name_th || "",
+      invoices: (invoices || []).map(inv => ({
+        id: inv.id,
+        totalAmount: Number(inv.total_amount || 0),
+        status: inv.status,
+        note: inv.note,
+        dueDate: inv.due_date,
+        paidAt: inv.paid_at,
+        createdAt: inv.created_at,
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "server_error" });
+  }
+});
+
+/* =========================
    SlipOK — ตรวจ slip ผ่าน LINE Webhook
    ========================= */
 
