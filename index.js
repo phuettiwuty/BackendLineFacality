@@ -813,10 +813,21 @@ app.delete("/api/v1/condos/:condoId", authRequired, async (req, res) => {
       .from("condos").select("id").eq("id", condoId).eq("owner_id", ownerId).maybeSingle();
     if (!condo) return res.status(404).json({ error: "not_found" });
 
-    // ลบห้องก่อน
-    await supabaseAdmin.from("rooms").delete().eq("condo_id", condoId);
+    // ลบข้อมูลที่ผูกกับคอนโดทั้งหมด เพื่อป้องกัน Foreign Key Error
+    await supabaseAdmin.from("condo_staff").delete().eq("condo_id", condoId);
+    await supabaseAdmin.from("condo_services").delete().eq("condo_id", condoId);
+    await supabaseAdmin.from("condo_utility_configs").delete().eq("condo_id", condoId);
+    await supabaseAdmin.from("condo_bank_accounts").delete().eq("condo_id", condoId);
+    await supabaseAdmin.from("facilities").delete().eq("condo_id", condoId);
+
+    // ลบห้องและบิลก่อน
+    await supabaseAdmin.from("invoices").delete().eq("condo_id", condoId);
+    const { error: roomErr } = await supabaseAdmin.from("rooms").delete().eq("condo_id", condoId);
+    if (roomErr) throw roomErr;
+
     // ลบคอนโด
-    await supabaseAdmin.from("condos").delete().eq("id", condoId);
+    const { error: condoErr } = await supabaseAdmin.from("condos").delete().eq("id", condoId);
+    if (condoErr) throw condoErr;
 
     return res.json({ ok: true });
   } catch (e) {
